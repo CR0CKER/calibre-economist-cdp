@@ -12,3 +12,5 @@ bandit -q -c bandit.yaml -r .
 
 echo "== pytest"
 python3 -m pytest -q
+
+echo "== all gates passed"

@@ -79,7 +79,9 @@ def _load_recipe() -> types.ModuleType:
     module = types.ModuleType('economist_recipe')
     module.__file__ = str(RECIPE)
     sys.modules['economist_recipe'] = module
-    exec(compile(RECIPE.read_text(), str(RECIPE), 'exec'), module.__dict__)  # noqa: S102
+    # The test harness loading the file under test; calibre itself loads a
+    # recipe the same way (compile_recipe execs the recipe source).
+    exec(compile(RECIPE.read_text(), str(RECIPE), 'exec'), module.__dict__)  # noqa: S102  # nosec B102
     return module
 
 
