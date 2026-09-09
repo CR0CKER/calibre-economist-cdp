@@ -11,7 +11,6 @@ from html5_parser import parse
 from lxml import etree
 from urllib.parse import urlparse
 
-from calibre import browser
 from calibre.utils.date import local_tz
 from calibre.web.feeds.news import BasicNewsRecipe
 
@@ -39,9 +38,10 @@ def _calibre_config_dir():
     fallbacks mirror economist_session.calibre_config_dir() for test runs."""
     try:
         from calibre.constants import config_dir
-        return config_dir
     except Exception:
-        pass
+        config_dir = ''     # not running inside calibre (tests); fall through
+    if config_dir:
+        return config_dir
     env = os.environ.get('CALIBRE_CONFIG_DIRECTORY')
     if env:
         return os.path.expanduser(env)
@@ -335,10 +335,20 @@ class CDPBrowser(object):
         return host == 'economist.com' or host.endswith('.economist.com')
 
     def _plain_open(self, url, timeout):
-        """Ordinary urllib fetch, for third-party assets."""
+        """Ordinary urllib fetch, for third-party assets.
+
+        The URL comes out of page HTML, so the scheme is checked first: urllib
+        would happily open file:// or ftp://, which would pull a local file into
+        the book. Only http(s) assets are fetched.
+        """
+        import urllib.error
         import urllib.request
-        req = urllib.request.Request(url, headers={'User-Agent': self._ua})
-        return urllib.request.urlopen(req, timeout=timeout or 60)
+
+        if urlparse(url).scheme not in ('http', 'https'):
+            raise urllib.error.URLError('refusing non-http(s) URL: ' + str(url))
+        # Scheme is restricted to http(s) immediately above.
+        req = urllib.request.Request(url, headers={'User-Agent': self._ua})  # noqa: S310
+        return urllib.request.urlopen(req, timeout=timeout or 60)  # noqa: S310
 
     def open_novisit(self, url_or_request, data=None, timeout=None):
         import base64
@@ -396,8 +406,9 @@ class CDPBrowser(object):
     def shutdown(self):
         try:
             self._cdp.close()
-        except Exception:
-            pass
+        except Exception as e:
+            if self._log:
+                self._log('Closing the CDP connection failed:', e)
 
 
 _cdp_browser = None
