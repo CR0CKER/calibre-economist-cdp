@@ -1,9 +1,15 @@
 line-length = 100
+# calibre compiles the recipe from a string, but it is Python and gets linted.
+extend-include = ["*.recipe"]
 target-version = "py310"
 
 [lint]
 select = ["F", "E9", "B", "S"]
 # The recipe is Python but calibre compiles it from a string; lint it as a module.
 [lint.per-file-ignores]
-"test_*.py" = ["S101"]   # pytest asserts
+"test_*.py" = ["S101", "S108"]   # pytest asserts; /tmp literals are fixture data
+"conftest.py" = ["S101", "S102"]  # test harness: asserts, and exec of the recipe under test
+# Every subprocess call is an argv list built from our own constants, never a
+# shell string; the browser command comes from the user's own environment.
+"economist.recipe" = ["S603"]
 "economist_chrome.py" = ["S603"]  # every subprocess call is an argv list; BROWSER_CMD comes from the user's own environment
