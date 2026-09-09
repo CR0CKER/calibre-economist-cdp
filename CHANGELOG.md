@@ -4,6 +4,9 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Changed
+- README states plainly that Linux is the only supported platform and adds a *Porting to macOS and Windows* section naming the exact blockers found by an audit, so the work is pickup-able by someone who can test on those platforms.
+
 ## [1.1.0] - 2026-09-09
 
 ### Removed
