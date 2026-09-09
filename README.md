@@ -1,6 +1,6 @@
 # The Economist for calibre, through your own Chromium
 
-Last updated: 2026-09-09 09:45 AM CDT
+Last updated: 2026-09-09 09:49 AM CDT
 
 [![ci](https://github.com/CR0CKER/calibre-economist-cdp/actions/workflows/ci.yml/badge.svg)](https://github.com/CR0CKER/calibre-economist-cdp/actions/workflows/ci.yml)
 [![license](https://img.shields.io/github/license/CR0CKER/calibre-economist-cdp)](LICENSE)
@@ -153,6 +153,7 @@ that runs calibre (for a flatpak calibre: `flatpak override --user --env=... com
 | `ECONOMIST_BROWSER_CMD` | command that starts Chromium, e.g. `google-chrome` or `flatpak run --command=chromium org.chromium.Chromium` | ungoogled-chromium flatpak |
 | `ECONOMIST_CHROME_PROFILE` | the dedicated profile directory (never your everyday profile) | inside the flatpak's config tree |
 | `ECONOMIST_SESSION_SCRIPT` | path to `economist_session.py`, if the recorded location is wrong | the recorded location |
+| `ECONOMIST_DEBUG` | set to `1` to print the best-effort paths (retries, skipped teardown steps) to stderr | unset, silent |
 | `ECONOMIST_SERVE_MAX_S` | seconds after which a served browser is shut down regardless, so a crashed download cannot leave the DevTools port open | 2700 (45 min) |
 | `CALIBRE_CONFIG_DIRECTORY` | calibre's config dir, if not the flatpak or `~/.config/calibre` default | auto |
 
