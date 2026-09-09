@@ -1,6 +1,6 @@
 # The Economist for calibre, through your own Chromium
 
-Last updated: 2026-09-09 09:30 AM CDT
+Last updated: 2026-09-09 09:39 AM CDT
 
 [![ci](https://github.com/CR0CKER/calibre-economist-cdp/actions/workflows/ci.yml/badge.svg)](https://github.com/CR0CKER/calibre-economist-cdp/actions/workflows/ci.yml)
 [![license](https://img.shields.io/github/license/CR0CKER/calibre-economist-cdp)](LICENSE)
@@ -213,7 +213,7 @@ Every one of these caused a silent failure during development.
 | Seeding `datadome` / `__cf_bm` into a fresh profile | Those identify a *device*. Copying them from a blocked profile imports the block. Seed the login cookies only |
 | Reading Chromium's `Cookies` SQLite file directly | Values are encrypted with OSCrypt. `Network.getAllCookies` returns them decrypted, HttpOnly included |
 | `flatpak-spawn --host` **without `--directory=`** | The sandbox's CWD during a fetch is a private `/tmp/calibre-*` path that does not exist on the host; the portal refuses: `Failed to change to directory …` |
-| Putting the CDP endpoint file under the **browser's** `~/.var/app/…` tree | flatpak reserves `~/.var/app`; an app with `filesystems=host` still sees only its *own* subtree there. The recipe silently falls back to mechanize and every article 403s. It lives in calibre's config dir instead |
+| Putting the CDP endpoint file under the **browser's** `~/.var/app/…` tree | flatpak reserves `~/.var/app`; an app with `filesystems=host` still sees only its *own* subtree there, so the recipe cannot find the endpoint and the download fails outright. It lives in calibre's config dir instead |
 | An in-page `fetch()` to a **cross-origin** URL | Blocked by CORS (`TypeError: Failed to fetch`). Non-economist.com URLs (the masthead) go through plain `urllib`; they need no credentials |
 | Using `curl` to decide whether mechanize will work | curl 200, mechanize 403, same cookies, same URLs. Not a valid proxy |
 | Selecting cookies with `host_key LIKE '%economist.com'` | `.marber-cdn.economist.com` and `p.zephr.economist.com` carry **their own `__cf_bm`**. Symptom: most articles die with `IndexError` while the index works. Use the exact hosts |
@@ -240,8 +240,10 @@ Every one of these caused a silent failure during development.
 
 ## Known limitations
 
-- **mechanize can never work.** Clearance is bound to the TLS fingerprint. Only a
-  real browser's handshake is accepted.
+- **mechanize can never work, so there is no fallback transport.** Clearance is
+  bound to the TLS fingerprint; only a real browser's handshake is accepted. If
+  the served session is missing the download fails immediately and says so,
+  rather than silently producing an edition of error pages.
 - **Fetches are serialised.** One websocket means one CDP call at a time. Each fetch
   is a few tenths of a second, so a full edition takes a few minutes.
 - **The session is IP- and User-Agent-bound.** Seed on the machine that will
@@ -263,7 +265,7 @@ Every one of these caused a silent failure during development.
 | `economist_session.py` | Entry point: freshness logic, cookie-file contract, reporting, config-dir discovery. |
 | `economist_chrome.py` | The navigator and fetch session: drives Chromium over CDP; `--serve` leaves it running. Contains a minimal RFC 6455 WebSocket client so there is nothing to install. |
 | `import_curl_cookies.py` | One-time import from a DevTools "Copy as cURL". |
-| `check_economist_access.py` | Standalone diagnostic: can these cookies reach the site? Runs under `calibre-debug`. |
+| `check_economist_access.py` | Standalone diagnostic: does the served session reach the site? Run it after `--serve`. |
 | `test_*.py` | Unit tests. Run via `scripts/gates.sh` |
 | `scripts/gates.sh` | The merge gates: `ruff`, `bandit`, `pytest`. CI runs exactly this script |
 | `requirements-dev.txt` | Hash-locked dev tools (pytest, ruff, bandit). Not needed at run time |
@@ -285,8 +287,7 @@ flatpaks. Two things there are worth knowing even if you are elsewhere:
 - On that machine calibre's own QtWebEngine worker (`calibre-parallel`) segfaults
   inside `libQt6WebEngineCore`, and worse than crashing it *hangs* the download job.
   That is why this design keeps QtWebEngine out of the fetch path entirely rather
-  than using `browser_type = 'webengine'` with replayed cookies, which would
-  otherwise be a viable (if fragile) alternative.
+  than using `browser_type = 'webengine'` with replayed cookies.
 - A flatpak override with `--disable-gpu` for calibre, added to stop those
   crashes, removed WebGL from calibre's Chromium and was one of the two signals
   that got the device reclassified by DataDome. Driving an external browser

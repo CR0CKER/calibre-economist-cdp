@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import struct
 import time
 
@@ -382,6 +383,10 @@ def test_stop_serving_removes_the_endpoint_and_kills_the_pid(
 
     killed = []
     monkeypatch.setattr(mod.os, 'kill', lambda pid, sig: killed.append((pid, sig)))
+    # L1: the pid is only signalled once it is confirmed to still be our
+    # browser. Pids are recycled, so the unconditional kill this test used to
+    # assert could have hit an unrelated process after a reboot.
+    monkeypatch.setattr(mod, 'pid_is_our_browser', lambda pid: True)
     assert mod.stop_serving() == 0
     assert killed == [(4242, 15)]
     assert not path.exists()
@@ -443,17 +448,86 @@ def test_launch_command_does_not_open_remote_origins(monkeypatch, tmp_path):
     assert '--remote-debugging-port=4321' in captured['cmd']
 
 
-def test_reap_stops_only_the_browser_it_was_started_for(monkeypatch):
+def test_reap_stops_the_browser_it_was_started_for(monkeypatch):
     monkeypatch.setattr(mod.time, 'sleep', lambda s: None)
+    monkeypatch.setattr(mod, 'SERVE_MAX_S', 0.0)      # deadline already passed
     stopped = []
     monkeypatch.setattr(mod, 'stop_serving', lambda: stopped.append(True) or 0)
-
     monkeypatch.setattr(mod, 'read_endpoint', lambda: {'port': 10, 'pid': 20})
-    assert mod.reap(10, 20) == 0 and stopped == [True]
+    assert mod.reap(10, 20) == 0
+    assert stopped == [True]
 
-    stopped.clear()
-    monkeypatch.setattr(mod, 'read_endpoint', lambda: {'port': 10, 'pid': 99})
-    assert mod.reap(10, 20) == 0 and stopped == []
 
-    monkeypatch.setattr(mod, 'read_endpoint', lambda: None)
-    assert mod.reap(10, 20) == 0 and stopped == []
+@pytest.mark.parametrize('endpoint', [
+    {'port': 10, 'pid': 99},    # a different browser is being served now
+    {'port': 11, 'pid': 20},
+    None,                       # already stopped
+])
+def test_reap_leaves_any_other_browser_alone(monkeypatch, endpoint):
+    monkeypatch.setattr(mod.time, 'sleep', lambda s: None)
+    monkeypatch.setattr(mod, 'SERVE_MAX_S', 0.0)
+    stopped = []
+    monkeypatch.setattr(mod, 'stop_serving', lambda: stopped.append(True) or 0)
+    monkeypatch.setattr(mod, 'read_endpoint', lambda: endpoint)
+    assert mod.reap(10, 20) == 0
+    assert stopped == []
+
+
+def test_reap_exits_early_once_the_endpoint_is_gone(monkeypatch):
+    """A normal --stop must let the reaper exit, not idle out the whole cap."""
+    monkeypatch.setattr(mod, 'SERVE_MAX_S', 3600.0)
+    slept = []
+    monkeypatch.setattr(mod.time, 'sleep', lambda s: slept.append(s))
+    seen = iter([{'port': 10, 'pid': 20}, None])
+    monkeypatch.setattr(mod, 'read_endpoint', lambda: next(seen))
+    monkeypatch.setattr(mod, 'stop_serving', lambda: pytest.fail('must not stop'))
+    assert mod.reap(10, 20) == 0
+    assert slept == [mod.REAP_POLL_S]      # one poll, then it noticed and left
+
+
+# --- L1: never signal a pid that is not our browser -------------------------
+
+def test_pid_is_our_browser_matches_only_the_profile(monkeypatch, tmp_path):
+    profile = str(tmp_path / 'chromium-economist')
+    monkeypatch.setattr(mod, 'CHROME_PROFILE', profile)
+    proc = tmp_path / 'proc'
+    (proc / '111').mkdir(parents=True)
+    (proc / '111' / 'cmdline').write_bytes(
+        b'chromium\x00--user-data-dir=' + profile.encode() + b'\x00')
+    (proc / '222').mkdir()
+    (proc / '222' / 'cmdline').write_bytes(b'sshd\x00-D\x00')
+
+    real_open = open
+
+    def fake_open(path, *a, **kw):
+        if isinstance(path, str) and path.startswith('/proc/'):
+            path = str(proc / path.split('/proc/')[1])
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr('builtins.open', fake_open)
+    assert mod.pid_is_our_browser(111) is True
+    assert mod.pid_is_our_browser(222) is False
+    assert mod.pid_is_our_browser(999) is False
+
+
+# --- L2: the recipe's session pointer must not be group/world writable ------
+
+def test_session_pointer_is_written_0644(monkeypatch, tmp_path):
+    monkeypatch.setattr(session, 'CONFIG_DIR', str(tmp_path))
+    monkeypatch.setattr(session, 'SESSION_POINTER', str(tmp_path / 'p.path'))
+    session.record_location()
+    assert stat.S_IMODE(os.stat(tmp_path / 'p.path').st_mode) == 0o644
+
+
+def test_stop_serving_does_not_kill_a_recycled_pid(tmp_path, monkeypatch) -> None:
+    """A pid that no longer belongs to our browser must never be signalled."""
+    path = tmp_path / 'ep.json'
+    monkeypatch.setattr(mod, 'ENDPOINT_FILE', str(path))
+    mod.write_endpoint({'port': 1, 'pid': 4242})
+
+    killed = []
+    monkeypatch.setattr(mod.os, 'kill', lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(mod, 'pid_is_our_browser', lambda pid: False)
+    assert mod.stop_serving() == 0
+    assert killed == []
+    assert not path.exists()   # the stale endpoint is still cleaned up
