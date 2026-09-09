@@ -4,6 +4,8 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-09
+
 ### Removed
 - **M4** The legacy QtWebEngine navigator (`--navigate-qt`, `--export`) and its Qt profile, and the mechanize and QtWebEngine fallback transports in the recipe. The CDP session is the only transport; a missing session now fails immediately instead of silently downloading error pages. `check_economist_access.py` probes the served session rather than the removed transports.
 

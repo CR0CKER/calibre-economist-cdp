@@ -1,6 +1,6 @@
 # The Economist for calibre, through your own Chromium
 
-Last updated: 2026-09-09 09:49 AM CDT
+Last updated: 2026-09-09 09:50 AM CDT
 
 [![ci](https://github.com/CR0CKER/calibre-economist-cdp/actions/workflows/ci.yml/badge.svg)](https://github.com/CR0CKER/calibre-economist-cdp/actions/workflows/ci.yml)
 [![license](https://img.shields.io/github/license/CR0CKER/calibre-economist-cdp)](LICENSE)
@@ -12,8 +12,8 @@ images, automatically and on a schedule, by letting calibre fetch through a real
 Chromium that you already have installed, driven over the Chrome DevTools
 Protocol (CDP).
 
-**Status:** working. Last verified 2026-09-09 (edition of 2026-09-05), 0 failures,
-0 HTTP 403s. Discussion: MobileRead thread
+**Status:** working. Last verified 2026-09-09 against the edition of 2026-09-05:
+full articles with images, 0 failures, 0 HTTP 403s. Discussion: MobileRead thread
 [Economist failed after upgrade to 9.10](https://www.mobileread.com/forums/showthread.php?t=374136).
 
 You need an Economist **subscription**. This project shares code only; no
