@@ -106,6 +106,12 @@ POLL_INTERVAL_S = 1.0
 SETTLE_S = 2.0
 
 log = logging.getLogger('economist_chrome')
+# The best-effort paths above log at debug level. They are silent by default so
+# a normal run stays readable; set ECONOMIST_DEBUG=1 to see why something was
+# retried, skipped or escalated.
+if os.environ.get('ECONOMIST_DEBUG'):
+    logging.basicConfig(level=logging.DEBUG, stream=sys.stderr,
+                        format='%(name)s %(levelname)s %(message)s')
 
 _DD_RT = re.compile(r"'rt'\s*:\s*'(\w)'")
 
@@ -305,7 +311,8 @@ def wait_for_cdp(port: int, proc: subprocess.Popen) -> str:
         try:
             with urllib.request.urlopen(url, timeout=2) as r:  # nosec B310 - literal http://127.0.0.1
                 return json.loads(r.read())['webSocketDebuggerUrl']
-        except Exception:
+        except Exception as e:  # noqa: BLE001 - the port is simply not up yet
+            log.debug('CDP not ready on port %s: %r', port, e)
             time.sleep(0.5)
     raise SystemExit(f'ERROR: CDP never came up on port {port}')
 
@@ -328,7 +335,8 @@ def minimize_window(cdp: CDP, target_id: str) -> bool:
             'bounds': {'windowState': 'minimized'},
         })
         return True
-    except Exception:
+    except Exception as e:  # noqa: BLE001 - cosmetic; a visible window is not a failure
+        log.debug('could not minimize the window: %r', e)
         return False
 
 
@@ -414,7 +422,8 @@ def stop_serving() -> int:
         with urllib.request.urlopen(  # nosec B310 - literal loopback http URL
                 f'http://127.0.0.1:{info["port"]}/json/version', timeout=3) as r:
             cdp = CDP(json.loads(r.read())['webSocketDebuggerUrl'])
-    except Exception:
+    except Exception as e:  # noqa: BLE001 - browser already gone; pid fallback below
+        log.debug('no reachable DevTools endpoint: %r', e)
         cdp = None
     if cdp is None:
         # No CDP to ask politely; fall back to the recorded pid.
@@ -427,7 +436,7 @@ def stop_serving() -> int:
     else:
         try:
             cdp.call('Browser.close', timeout=5)
-        except Exception as e:  # best effort: the pid fallback below still applies
+        except Exception as e:  # noqa: BLE001 - best effort; pid fallback still applies
             log.debug('Browser.close failed: %r', e)
         cdp.close()
     try:
@@ -441,14 +450,15 @@ def shutdown(cdp: CDP | None, proc: subprocess.Popen | None) -> None:
     if cdp is not None:
         try:
             cdp.call('Browser.close', timeout=5)
-        except Exception as e:  # teardown must not raise; terminate() follows
+        except Exception as e:  # noqa: BLE001 - teardown must not raise; terminate() follows
             log.debug('Browser.close failed: %r', e)
         cdp.close()
     if proc is not None and proc.poll() is None:
         try:
             proc.terminate()
             proc.wait(timeout=10)
-        except Exception:
+        except Exception as e:  # noqa: BLE001 - refused to exit; escalate to SIGKILL
+            log.debug('terminate failed, killing: %r', e)
             proc.kill()
 
 
@@ -537,7 +547,8 @@ def dump_challenge(cdp: CDP, session: str) -> None:
             'expression': 'document.documentElement.outerHTML',
             'returnByValue': True}, session)
         html = res.get('result', {}).get('value') or ''
-    except Exception:
+    except Exception as e:  # noqa: BLE001 - diagnostics only; never mask the real failure
+        log.debug('could not capture the challenge page: %r', e)
         return
     fd = os.open(CHALLENGE_DUMP, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, 'w', encoding='utf-8') as f:
@@ -592,7 +603,7 @@ def run(seed: bool = False, serve: bool = False) -> int:
             time.sleep(POLL_INTERVAL_S)
             try:
                 info = probe(cdp, session)
-            except Exception as e:  # mid-reload the page has no document yet
+            except Exception as e:  # noqa: BLE001 - mid-reload there is no document yet
                 log.debug('probe failed, retrying: %r', e)
                 continue
             if info['next'] and not info['markers']:
