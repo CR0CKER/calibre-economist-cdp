@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
-"""Preflight check: can calibre reach economist.com with the harvested cookies?
+"""Preflight check: does the served browser session reach economist.com?
 
-economist.com sits behind a Cloudflare *managed* JS challenge plus DataDome. No
-plain HTTP client can solve that challenge, and calibre's QtWebEngine scraper
-cannot either (its backend never navigates to the target page, so the challenge
-JS never runs). The only workable route is to replay a real browser's clearance
-and session cookies.
+economist.com sits behind a Cloudflare managed JS challenge plus DataDome, so the
+only transport that works is the user's own browser, driven over CDP. This script
+answers "will a download work right now?" in seconds instead of after a
+fifteen-minute failure: it reports the cookie file's state and then fetches the
+index through the session ``economist_session.py --serve`` left running.
 
-Those cookies are short-lived and bound to IP + User-Agent, so this script exists
-to answer "are my cookies still good?" in seconds, instead of finding out after a
-fifteen-minute download fails.
+Run it on the host, after --serve::
 
-Run it inside the flatpak::
+    python3 economist_session.py --serve
+    python3 check_economist_access.py
 
-    flatpak run --command=calibre-debug com.calibre_ebook.calibre \
-        -e /path/to/calibre-economist-cdp/check_economist_access.py
-
-Exit codes: 0 = at least one transport works, 1 = cookies stale/unusable,
+Exit codes: 0 = the session reaches the page, 1 = it does not,
 2 = cookie file missing or malformed.
 
 SECURITY: cookie values are credentials. This script prints cookie *names* and
@@ -25,12 +21,12 @@ value *lengths* only, never the values themselves.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import stat
 import sys
 import time
-from contextlib import suppress
 from typing import NoReturn, TypedDict
 
 INDEX_URL = 'https://www.economist.com/weeklyedition'
@@ -170,41 +166,57 @@ def classify(raw: bytes) -> ProbeResult:
     }
 
 
-def probe_mechanize(creds: Credentials) -> ProbeResult:
-    """Transport A: calibre's mechanize browser (Python TLS fingerprint)."""
-    from calibre import browser
+def probe_cdp(creds: Credentials) -> ProbeResult:
+    """Fetch the index through the served Chromium session - the real transport.
 
-    br = browser(user_agent=creds['user_agent'])
-    for name, value in creds['cookies']:
-        br.set_simple_cookie(name, value, COOKIE_DOMAIN)
-    raw = br.open_novisit(INDEX_URL, timeout=60).read()
-    result = classify(raw)
-    result['transport'] = 'mechanize'
-    return result
+    Requires ``economist_session.py --serve`` to have left a browser running;
+    that is what the recipe uses, so this answers the question the recipe cares
+    about rather than testing a transport nothing uses any more.
 
-
-def probe_webengine(creds: Credentials) -> ProbeResult:
-    """Transport B: QtWebEngine (Chromium TLS fingerprint - closest to a real browser).
-
-    Note WebEngineBrowser has no ``addheaders``, so cookies must go in via
-    set_simple_cookie rather than a raw Cookie header.
+    Classification happens *in the page*: an edition index is megabytes, and
+    shipping it back over the websocket only to search it here would be slow and
+    would risk truncating away the very marker being looked for.
     """
-    from calibre.scraper.qt import WebEngineBrowser
+    from economist_chrome import CDP, read_endpoint
 
-    br = WebEngineBrowser(user_agent=creds['user_agent'])
+    info = read_endpoint()
+    if info is None:
+        return {'transport': 'cdp', 'ok': False,
+                'detail': 'no served browser (run economist_session.py --serve)'}
+    markers = [m.decode() for m in CHALLENGE_MARKERS]
+    expr = """
+    (async () => {
+      const r = await fetch(%s, {credentials: 'include'});
+      const t = await r.text();
+      return JSON.stringify({
+        status: r.status, len: t.length,
+        marker: %s.find(m => t.includes(m)) || null,
+        next: t.includes(%s),
+      });
+    })()
+    """ % (json.dumps(INDEX_URL), json.dumps(markers),
+           json.dumps(SUCCESS_MARKER.decode()))
+
+    cdp = CDP(info['ws'])
     try:
-        br.set_user_agent(creds['user_agent'])
-        for name, value in creds['cookies']:
-            br.set_simple_cookie(name, value, COOKIE_DOMAIN)
-        raw = br.open_novisit(INDEX_URL, timeout=90).read()
+        reply = cdp.call('Runtime.evaluate', {
+            'expression': expr, 'awaitPromise': True, 'returnByValue': True,
+        }, timeout=120)
     finally:
-        # The browser spawns a worker process that keeps the interpreter alive.
-        # Without this the script hangs after printing its result.
-        with suppress(Exception):
-            br.shutdown()
-    result = classify(raw)
-    result['transport'] = 'webengine'
-    return result
+        cdp.close()
+    page = json.loads(reply['result']['value'])
+
+    if page['marker']:
+        detail = (f'blocked - challenge page ({page["marker"]}), '
+                  f'HTTP {page["status"]}, {page["len"]} chars')
+        return {'transport': 'cdp', 'ok': False, 'detail': detail}
+    if page['next']:
+        detail = (f'OK - __NEXT_DATA__ present, HTTP {page["status"]}, '
+                  f'{page["len"]} chars')
+        return {'transport': 'cdp', 'ok': True, 'detail': detail}
+    return {'transport': 'cdp', 'ok': False,
+            'detail': (f'unexpected page - no __NEXT_DATA__ and no challenge '
+                       f'marker, HTTP {page["status"]}, {page["len"]} chars')}
 
 
 def main() -> int:
@@ -220,37 +232,26 @@ def main() -> int:
         print('Cookie age  : unknown (no parseable __cf_bm)')
     else:
         remaining = CF_BM_LIFETIME_MIN - age
-        verdict = f'{remaining:.0f} min left' if remaining > 0 else 'EXPIRED - re-harvest'
+        verdict = f'{remaining:.0f} min left' if remaining > 0 else 'EXPIRED - refresh'
         print(f'Cookie age  : {age:.1f} min of {CF_BM_LIFETIME_MIN:.0f} ({verdict})')
-    interesting = {'cf_clearance', 'datadome'}
     present = {n for n, _ in creds['cookies']}
-    for wanted in sorted(interesting):
-        state = 'present' if wanted in present else 'MISSING'
-        print(f'    -> {wanted}: {state}')
+    for wanted in sorted({'cf_clearance', 'datadome'}):
+        print(f'    -> {wanted}: {"present" if wanted in present else "MISSING"}')
     print()
 
-    results: list[ProbeResult] = []
-    for label, probe in (('mechanize', probe_mechanize), ('webengine', probe_webengine)):
-        try:
-            result = probe(creds)
-        except Exception as e:  # noqa: BLE001 - report any transport failure, keep probing
-            result = {'transport': label, 'ok': False, 'detail': f'{type(e).__name__}: {e}'}
-        results.append(result)
-        status = 'PASS' if result['ok'] else 'FAIL'
-        print(f'[{status}] {result["transport"]:<10s} {result["detail"]}', flush=True)
-
-    winners = [r['transport'] for r in results if r['ok']]
+    try:
+        result = probe_cdp(creds)
+    except Exception as e:  # noqa: BLE001 - report any failure, never traceback at the user
+        result = {'transport': 'cdp', 'ok': False, 'detail': f'{type(e).__name__}: {e}'}
+    print(f'[{"PASS" if result["ok"] else "FAIL"}] cdp        {result["detail"]}', flush=True)
     print()
-    if winners:
-        print(f'GO: usable transport(s): {", ".join(winners)}')
-        print(f'Use browser transport "{winners[0]}" in the recipe.')
+
+    if result['ok']:
+        print('GO: the served browser session reaches the real page.')
         return 0
-
-    print('NO-GO: no transport reached the real page.')
-    print('Either the cookies have expired (re-harvest them) or Cloudflare is')
-    print('binding clearance to the browser TLS fingerprint, which calibre cannot')
-    print('reproduce. Re-harvest first; if a fresh cookie still fails, the')
-    print('cookie-bridge approach is not viable on this site.')
+    print('NO-GO: the served session did not reach the page.')
+    print('Run economist_session.py --refresh and read what it reports; a')
+    print('DataDome rt=c means the device is blocked and needs a re-seed.')
     return 1
 
 

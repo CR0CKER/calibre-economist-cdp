@@ -11,8 +11,6 @@ from html5_parser import parse
 from lxml import etree
 from urllib.parse import urlparse
 
-from mechanize import Request
-
 from calibre import browser
 from calibre.utils.date import local_tz
 from calibre.web.feeds.news import BasicNewsRecipe
@@ -166,8 +164,15 @@ def _find_session_script():
     env = os.environ.get('ECONOMIST_SESSION_SCRIPT')
     if env:
         return os.path.expanduser(env)
+    pointer = os.path.join(CONFIG_DIR, 'economist-session.path')
     try:
-        with open(os.path.join(CONFIG_DIR, 'economist-session.path'), encoding='utf-8') as f:
+        # The path in this file is imported and executed, so anyone who can
+        # write it gets code execution inside calibre. It is in the user's own
+        # config dir, but refuse it outright if the filesystem disagrees.
+        mode = stat.S_IMODE(os.stat(pointer).st_mode)
+        if mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return ''
+        with open(pointer, encoding='utf-8') as f:
             recorded = f.read().strip()
         if recorded:
             return recorded
@@ -250,39 +255,6 @@ def refresh_session(log):
 def is_challenge(raw):
     """True if the response body is a bot-challenge interstitial."""
     return any(marker in raw for marker in CHALLENGE_MARKERS)
-
-
-def cookie_browser(user_agent, cookies):
-    """A mechanize browser carrying the harvested UA and cookies."""
-    br = browser(user_agent=user_agent)
-    for name, value in cookies:
-        br.set_simple_cookie(name, value, COOKIE_DOMAIN)
-    return br
-
-
-_webengine_browser = None
-
-# Which transport is known to work: None (undecided), 'mechanize' or 'webengine'.
-_transport = None
-
-
-def webengine_cookie_browser(user_agent, cookies):
-    """A QtWebEngine browser with the same cookies.
-
-    Chromium's TLS fingerprint is closer to a real browser than Python's, so this
-    is the fallback when Cloudflare rejects the mechanize transport. Created once
-    per run - each instance spawns a worker process.
-    """
-    global _webengine_browser
-    if _webengine_browser is None:
-        from calibre.scraper.qt import WebEngineBrowser
-
-        br = WebEngineBrowser(user_agent=user_agent)
-        br.set_user_agent(user_agent)
-        for name, value in cookies:
-            br.set_simple_cookie(name, value, COOKIE_DOMAIN)
-        _webengine_browser = br
-    return _webengine_browser
 
 
 # --------------------------------------------------------------------------
@@ -608,65 +580,22 @@ APP_VIEW_PARAMS = '?app=core%2Cfocused&no-chrome=key&no-adverts=key&webview=lisk
 
 
 def get_content(url):
-    """Fetch a page as the harvested browser session.
+    """Fetch a page through the served Chromium session.
 
     Both the edition index and every article flow through here, so this is the
-    single place cookies need to be applied. Tries the cheap mechanize transport
-    first and falls back to QtWebEngine, whose Chromium TLS fingerprint is more
-    likely to be accepted if Cloudflare binds clearance to it.
+    single place the session is applied. There is deliberately no HTTP-client
+    fallback: Cloudflare binds clearance to the TLS fingerprint, so mechanize
+    gets 403 on URLs that succeed in the browser (retested 2026-09-03: 316
+    failures, 0 articles). Failing loudly beats a silent edition of error pages.
     """
-    user_agent, cookies = load_credentials()
     full_url = url + APP_VIEW_PARAMS
-    headers = {
-        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'accept-language': 'en-US,en;q=0.9',
-        'upgrade-insecure-requests': '1',
-    }
-
-    # The CDP session is the transport. mechanize and QtWebEngine remain below
-    # only as a fallback for when --serve could not leave a browser running.
     br = cdp_browser()
-    if br is not None:
-        raw = br.open_novisit(full_url, timeout=120).read()
-        if raw and not is_challenge(raw):
-            return raw
+    if br is None:
         raise CookiesUnusable(
-            'Blocked by the bot challenge on ' + url + ' via the browser '
-            'session - the cookies are expired or no longer accepted. '
-            + HARVEST_HINT
+            'No browser session. economist_session.py --serve did not leave one '
+            'running, so there is no way to fetch ' + url + '. ' + HARVEST_HINT
         )
-
-    global _transport
-    raw = b''
-    mechanize_error = None
-
-    # Cloudflare binds clearance to the TLS fingerprint, so the mechanize
-    # transport is normally rejected with a 403 even with valid cookies. Try it
-    # once because it is much cheaper, then remember the answer: retrying it for
-    # every article would add a wasted round-trip per article.
-    if _transport in (None, 'mechanize'):
-        try:
-            br = cookie_browser(user_agent, cookies)
-            raw = br.open(Request(full_url, headers=headers)).read()
-        except Exception as e:
-            # A challenge surfaces as HTTP 403, which mechanize raises rather
-            # than returns, so a failure here is expected; fall through.
-            raw = b''
-            mechanize_error = e
-        if raw and not is_challenge(raw):
-            _transport = 'mechanize'
-            return raw
-        _transport = 'webengine'
-
-    try:
-        br = webengine_cookie_browser(user_agent, cookies)
-        raw = br.open_novisit(full_url, timeout=90).read()
-    except Exception as e:
-        raise CookiesUnusable(
-            'Both transports failed for ' + url + '. mechanize: '
-            + repr(mechanize_error) + ' webengine: ' + repr(e) + '. ' + HARVEST_HINT
-        )
-
+    raw = br.open_novisit(full_url, timeout=120).read()
     if not raw or is_challenge(raw):
         raise CookiesUnusable(
             'Blocked by the bot challenge on ' + url + ' - the cookies are '
@@ -704,12 +633,12 @@ class Economist(BasicNewsRecipe):
     # Chromium 151 session, so calibre never starts a QtWebEngine worker and
     # the segfault-then-hang failure mode cannot occur.
     #
-    # mechanize is NOT an option and never was: Cloudflare binds clearance to
-    # the TLS fingerprint. Retested 2026-09-03 with freshly earned cookies -
-    # `curl` with those cookies gets HTTP 200 on the index, articles and images,
-    # but calibre's mechanize gets 403 on the very same URLs (316 failures, 0
-    # articles). curl's TLS handshake passes where Python's does not, so curl is
-    # not a valid proxy for that decision. Chromium's handshake is the real one.
+    # There is no HTTP-client fallback anywhere in this recipe. Cloudflare binds
+    # clearance to the TLS fingerprint: retested 2026-09-03 with freshly earned
+    # cookies, `curl` gets HTTP 200 on the index, articles and images while
+    # calibre's mechanize gets 403 on the very same URLs (316 failures, 0
+    # articles). curl's handshake passes where Python's does not, so curl is not
+    # a valid proxy for that decision either.
     recipe_specific_options = {
         'date': {
             'short': 'The date of the edition to download (YYYY-MM-DD format)',
@@ -725,24 +654,21 @@ class Economist(BasicNewsRecipe):
     def get_browser(self, *args, **kwargs):
         """The browser calibre uses for articles and images.
 
-        Normally the CDP session that --serve left running. If that could not be
-        started, fall back to calibre's mechanize browser carrying the harvested
-        cookies - it will very likely 403, but failing loudly beats hanging.
+        Always the CDP session that --serve left running. There is no fallback
+        on purpose: an HTTP client gets 403 on every URL here, so falling back
+        would produce an edition of error pages instead of an obvious failure.
         """
         refresh_session(self.log)
-        user_agent, cookies = load_credentials()
+        user_agent, _cookies = load_credentials()
         self.last_used_ua = user_agent
 
         br = cdp_browser(self.log)
-        if br is not None:
-            self.log('Fetching through the Chromium session (no QtWebEngine).')
-            return br
-
-        self.log('WARNING: no browser session; falling back to mechanize.')
-        kwargs['user_agent'] = user_agent
-        br = BasicNewsRecipe.get_browser(self, *args, **kwargs)
-        for name, value in cookies:
-            br.set_simple_cookie(name, value, COOKIE_DOMAIN)
+        if br is None:
+            raise CookiesUnusable(
+                'economist_session.py --serve did not leave a browser running, '
+                'so there is nothing to fetch through. ' + HARVEST_HINT
+            )
+        self.log('Fetching through the Chromium session (no QtWebEngine).')
         return br
 
     def cleanup(self):
@@ -757,14 +683,6 @@ class Economist(BasicNewsRecipe):
                 br.shutdown()
             except Exception as e:
                 self.log('Failed to shut down the recipe browser:', e)
-
-        global _webengine_browser
-        if _webengine_browser is not None:
-            try:
-                _webengine_browser.shutdown()
-            except Exception as e:
-                self.log('Failed to shut down the WebEngine browser:', e)
-            _webengine_browser = None
 
         global _cdp_browser
         if _cdp_browser is not None:

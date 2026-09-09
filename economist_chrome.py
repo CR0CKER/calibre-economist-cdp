@@ -356,11 +356,26 @@ def start_reaper(port: int, pid: int) -> None:
         start_new_session=True)
 
 
+REAP_POLL_S = 30.0
+
+
 def reap(port: int, pid: int) -> int:
-    """Sleep SERVE_MAX_S, then stop the browser if it is still the served one."""
-    time.sleep(SERVE_MAX_S)
+    """Stop the served browser once it outlives SERVE_MAX_S.
+
+    Polls rather than sleeping the whole span so that a normal ``--stop`` at the
+    end of a download lets this exit within a poll interval, instead of leaving
+    an idle process around for the rest of the cap.
+    """
+    deadline = time.monotonic() + SERVE_MAX_S
+    while time.monotonic() < deadline:
+        info = read_endpoint()
+        if not (info and info.get('port') == port and info.get('pid') == pid):
+            return 0            # someone already stopped it; nothing to reap
+        time.sleep(min(REAP_POLL_S, max(0.0, deadline - time.monotonic())))
     info = read_endpoint()
     if info and info.get('port') == port and info.get('pid') == pid:
+        print(f'Reaping browser served on port {port} after '
+              f'{SERVE_MAX_S:.0f}s', flush=True)
         return stop_serving()
     return 0
 
@@ -371,6 +386,20 @@ def read_endpoint() -> dict | None:
             return json.load(f)
     except (OSError, ValueError):
         return None
+
+
+def pid_is_our_browser(pid: int) -> bool:
+    """True only if this pid is still the browser we started on our profile.
+
+    Pids are recycled. After a reboot or a crash the recorded pid may belong to
+    something else entirely, and signalling it would be someone else's outage.
+    """
+    try:
+        with open(f'/proc/{pid}/cmdline', 'rb') as f:
+            cmdline = f.read().decode('utf-8', 'replace')
+    except OSError:
+        return False           # no such process, or not Linux: do not signal
+    return CHROME_PROFILE in cmdline
 
 
 def stop_serving() -> int:
@@ -390,11 +419,11 @@ def stop_serving() -> int:
     if cdp is None:
         # No CDP to ask politely; fall back to the recorded pid.
         pid = info.get('pid')
-        if pid:
+        if pid and pid_is_our_browser(pid):
             try:
                 os.kill(pid, 15)
-            except OSError:
-                pass
+            except OSError as e:
+                log.debug('could not signal pid %s: %r', pid, e)
     else:
         try:
             cdp.call('Browser.close', timeout=5)

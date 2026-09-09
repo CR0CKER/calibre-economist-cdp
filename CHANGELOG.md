@@ -4,6 +4,9 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Removed
+- **M4** The legacy QtWebEngine navigator (`--navigate-qt`, `--export`) and its Qt profile, and the mechanize and QtWebEngine fallback transports in the recipe. The CDP session is the only transport; a missing session now fails immediately instead of silently downloading error pages. `check_economist_access.py` probes the served session rather than the removed transports.
+
 ### Added
 - **M2** CI workflow (ruff, bandit, pytest, gitleaks over full history) with SHA-pinned actions; `scripts/gates.sh` runs the same gates locally; hash-locked `requirements-dev.txt`; Dependabot for actions and pip; `main` protected by a ruleset requiring the CI check; commits SSH-signed.
 
@@ -13,6 +16,9 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - **L7** README carries a `Last updated` stamp and live CI, license and release badges.
 
 ### Fixed
+- The `--serve` reaper polls instead of sleeping the whole cap, so a normal `--stop` lets it exit within 30s rather than idling for 45 minutes.
+- **L1** `--stop` verifies via `/proc/<pid>/cmdline` that the recorded pid is still our browser on our profile before signalling it; pids are recycled.
+- **L2** The session-pointer file, whose contents are imported and executed inside calibre, is written 0644 and refused by the recipe if it is group- or world-writable.
 - Endpoint-location test asserted a flatpak-specific path and failed on any machine without the flatpak calibre (caught by the new CI). It now asserts the real invariant: the file lives in calibre's config dir and never under the browser's profile.
 - **H1** The DevTools port no longer passes `--remote-allow-origins=*`, which let any web page open on the machine connect and read the logged-in session. Origin-bearing clients are now refused by Chromium (verified: 403 on the handshake); the recipe's client sends no Origin and still connects.
 - **H1** `--serve` starts a detached reaper that closes the served browser after `ECONOMIST_SERVE_MAX_S` (default 45 min), so a crashed download cannot leave the port open indefinitely.
