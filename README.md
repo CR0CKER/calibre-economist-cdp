@@ -1,6 +1,6 @@
 # The Economist for calibre, through your own Chromium
 
-Last updated: 2026-09-09 09:50 AM CDT
+Last updated: 2026-09-09 10:01 AM CDT
 
 [![ci](https://github.com/CR0CKER/calibre-economist-cdp/actions/workflows/ci.yml/badge.svg)](https://github.com/CR0CKER/calibre-economist-cdp/actions/workflows/ci.yml)
 [![license](https://img.shields.io/github/license/CR0CKER/calibre-economist-cdp)](LICENSE)
@@ -31,6 +31,7 @@ downloaded editions are or will be distributed.
 - [Troubleshooting](#troubleshooting)
 - [Known limitations](#known-limitations)
 - [Files](#files)
+- [Porting to macOS and Windows](#porting-to-macos-and-windows)
 - [Platform notes: flatpak and Fedora Linux](#platform-notes-flatpak-and-fedora-linux)
 - [Attribution and license](#attribution-and-license)
 
@@ -107,8 +108,10 @@ taken from `Browser.getVersion`, so it can never drift from the engine again.
   flatpak; any other is a one-line environment override (see Setup).
 - Python 3.10+ on the host for the helper scripts. **No third-party packages**:
   the CDP client and its WebSocket implementation are stdlib only.
-- Linux. The CDP part is portable; the process-launching glue (flatpak-spawn,
-  paths) has only been built for Linux. Ports welcome.
+- **Linux.** That is the only platform this has ever run on, and the code does
+  not currently run on macOS or Windows. See
+  [Porting to macOS and Windows](#porting-to-macos-and-windows) for exactly what
+  stands in the way - it is not much, and help is welcome.
 
 ## Setup
 
@@ -279,6 +282,49 @@ Runtime state, all outside the repository:
 | `<calibre config>/economist-session.path` | Where the recipe finds the helper. |
 | `<calibre config>/economist-cdp-endpoint.json` | The live DevTools endpoint while a download runs. |
 | `<profile dir>/` | The dedicated Chromium profile, `0700`. |
+
+## Porting to macOS and Windows
+
+Not started, and I have no machine to test on. This is what an audit of the code
+found, so anyone picking it up starts from facts rather than from a survey. Pull
+requests welcome; I will review promptly.
+
+Everything in the DevTools layer is portable standard-library Python: the
+websocket client, the port allocation, the fetch path, the parser, the cookie
+handling. What breaks is the POSIX assumptions around it.
+
+**Windows: two blockers, both from the same cause.** Windows has no POSIX
+permission bits. `os.chmod` only toggles the read-only flag, and any writable
+file reads back as mode `0666`.
+
+| Where | What happens |
+|---|---|
+| `economist.recipe`, cookie-file check | Refuses every cookie file as "group/world readable" and tells the user to `chmod 600`, which cannot help there |
+| `economist.recipe`, session-pointer check | Refuses the pointer file the session helper itself just wrote, so the recipe never finds the helper |
+| `economist.recipe`, `_spawn` | Spawns `python3`, which is not the interpreter name on Windows |
+
+The fix is to gate both mode checks on `os.name == 'posix'` and resolve the
+interpreter rather than hard-coding it. Note what is lost: on Windows the
+credential files are not permission-protected at all, so the protection is the
+user profile's ACL and that should be said out loud in the docs.
+
+**macOS: one real bug, one degradation.**
+
+| Where | What happens |
+|---|---|
+| `economist_chrome.py`, `BROWSER_CMD` | The command is split on whitespace, so `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` becomes three arguments. `shlex.split` fixes it |
+| `economist_chrome.py`, `pid_is_our_browser` | Identifies the process through `/proc`, absent on macOS, so it returns False and the pid fallback never fires. Only matters after a crash; the normal shutdown goes over CDP |
+
+Defaults for the browser command and the profile directory are flatpak-shaped on
+both platforms, but both are environment overrides already.
+
+**The harder half is not the code.** Running is not working. This approach
+depends on the browser fingerprint being genuinely the user's own, and it has
+only ever been observed to clear DataDome on one machine, one profile, one IP.
+A port needs someone who can actually run a download and see articles, not just
+a green test suite.
+
+<sub>[↑ Back to contents](#contents)</sub>
 
 ## Platform notes: flatpak and Fedora Linux
 
