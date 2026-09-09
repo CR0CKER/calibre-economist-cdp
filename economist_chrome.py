@@ -94,6 +94,11 @@ CHALLENGE_DUMP = os.path.join(CHROME_PROFILE, 'last-challenge.html')
 COOKIE_HOSTS = ('.economist.com', 'www.economist.com', 'economist.com')
 
 LAUNCH_TIMEOUT_S = 30.0
+# A served browser holds a logged-in session behind an unauthenticated (if
+# loopback-only) DevTools port. If the recipe crashes before --stop, nothing
+# would ever close it, so --serve also starts a detached reaper that shuts the
+# browser down after this hard cap. A full edition takes a few minutes.
+SERVE_MAX_S = float(os.environ.get('ECONOMIST_SERVE_MAX_S', 45 * 60))
 SOLVE_TIMEOUT_S = 60.0
 POLL_INTERVAL_S = 1.0
 # Give a page that already looks good a moment to finish setting cookies.
@@ -266,7 +271,10 @@ def launch_browser(port: int) -> subprocess.Popen:
     cmd = BROWSER_CMD + [
         f'--user-data-dir={CHROME_PROFILE}',
         f'--remote-debugging-port={port}',
-        '--remote-allow-origins=*',
+        # No --remote-allow-origins. Chromium admits websocket clients that send
+        # no Origin header (this client sends none) and rejects browser-originated
+        # ones, which is exactly the split wanted: a web page open elsewhere on
+        # this machine must not be able to drive a logged-in session.
         '--no-first-run', '--no-default-browser-check',
         '--disable-features=Translate,MediaRouter',
         # A minimized window is a backgrounded one, and Chromium throttles those
@@ -334,6 +342,23 @@ def write_endpoint(info: dict) -> None:
     fd = os.open(ENDPOINT_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, 'w', encoding='utf-8') as f:
         json.dump(info, f)
+
+
+def start_reaper(port: int, pid: int) -> None:
+    """Detach a watchdog that stops this served browser after SERVE_MAX_S."""
+    subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__), '--reap', str(port), str(pid)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True)
+
+
+def reap(port: int, pid: int) -> int:
+    """Sleep SERVE_MAX_S, then stop the browser if it is still the served one."""
+    time.sleep(SERVE_MAX_S)
+    info = read_endpoint()
+    if info and info.get('port') == port and info.get('pid') == pid:
+        return stop_serving()
+    return 0
 
 
 def read_endpoint() -> dict | None:
@@ -584,6 +609,7 @@ def run(seed: bool = False, serve: bool = False) -> int:
             write_endpoint({'port': port, 'ws': page_ws, 'pid': proc.pid,
                             'at': time.time()})
             keep = True
+            start_reaper(port, proc.pid)
             print(f'Serving CDP on 127.0.0.1:{port}', flush=True)
         return 0
     finally:
@@ -614,6 +640,8 @@ def main(argv: list[str]) -> int:
         return run(seed=False)
     if mode == '--seed':
         return run(seed=True)
+    if mode == '--reap' and len(argv) == 4:
+        return reap(int(argv[2]), int(argv[3]))
     if mode == '--serve':
         return run(seed=False, serve=True)
     if mode == '--stop':

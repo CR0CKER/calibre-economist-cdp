@@ -277,7 +277,7 @@ def webengine_cookie_browser(user_agent, cookies):
     if _webengine_browser is None:
         from calibre.scraper.qt import WebEngineBrowser
 
-        br = WebEngineBrowser(user_agent=user_agent, verify_ssl_certificates=False)
+        br = WebEngineBrowser(user_agent=user_agent)
         br.set_user_agent(user_agent)
         for name, value in cookies:
             br.set_simple_cookie(name, value, COOKIE_DOMAIN)

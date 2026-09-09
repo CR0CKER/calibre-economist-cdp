@@ -191,7 +191,7 @@ def probe_webengine(creds: Credentials) -> ProbeResult:
     """
     from calibre.scraper.qt import WebEngineBrowser
 
-    br = WebEngineBrowser(user_agent=creds['user_agent'], verify_ssl_certificates=False)
+    br = WebEngineBrowser(user_agent=creds['user_agent'])
     try:
         br.set_user_agent(creds['user_agent'])
         for name, value in creds['cookies']:

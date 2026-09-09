@@ -147,6 +147,7 @@ that runs calibre (for a flatpak calibre: `flatpak override --user --env=... com
 | `ECONOMIST_BROWSER_CMD` | command that starts Chromium, e.g. `google-chrome` or `flatpak run --command=chromium org.chromium.Chromium` | ungoogled-chromium flatpak |
 | `ECONOMIST_CHROME_PROFILE` | the dedicated profile directory (never your everyday profile) | inside the flatpak's config tree |
 | `ECONOMIST_SESSION_SCRIPT` | path to `economist_session.py`, if the recorded location is wrong | the recorded location |
+| `ECONOMIST_SERVE_MAX_S` | seconds after which a served browser is shut down regardless, so a crashed download cannot leave the DevTools port open | 2700 (45 min) |
 | `CALIBRE_CONFIG_DIRECTORY` | calibre's config dir, if not the flatpak or `~/.config/calibre` default | auto |
 
 **Flatpak calibre only:** the recipe has to start a program on the host from inside
@@ -211,6 +212,7 @@ Every one of these caused a silent failure during development.
 | Using `curl` to decide whether mechanize will work | curl 200, mechanize 403, same cookies, same URLs. Not a valid proxy |
 | Selecting cookies with `host_key LIKE '%economist.com'` | `.marber-cdn.economist.com` and `p.zephr.economist.com` carry **their own `__cf_bm`**. Symptom: most articles die with `IndexError` while the index works. Use the exact hosts |
 | `--headless` | Is itself a bot signal. The browser runs headful, positioned off-screen and minimized, with background throttling disabled |
+| `--remote-allow-origins=*` on the DevTools port | Lets **any web page open in any browser on the machine** connect to the port and read the logged-in session's cookies. Chromium admits origin-less clients (this one sends no `Origin`) and rejects browser-originated ones without the flag, so it is simply omitted. A reaper also closes a served browser after `ECONOMIST_SERVE_MAX_S` |
 | `browser_type = 'webengine'` set only inside `get_content` | Index works, every article 403s: articles and images go through `self.browser` in calibre's own fetcher |
 | Running `ebook-convert` from a path a flatpak calibre cannot see (`/tmp/…`) | calibre falls back to a builtin-title lookup and reports a misleading `TypeError: 'NoneType' object is not subscriptable` |
 

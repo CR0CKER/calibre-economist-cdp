@@ -417,3 +417,37 @@ def test_record_location_writes_pointer(monkeypatch, tmp_path):
     session.record_location()
     recorded = (tmp_path / 'economist-session.path').read_text().strip()
     assert recorded == os.path.abspath(session.__file__)
+
+
+# --- H1: the DevTools port must not admit browser-originated clients ---------
+
+def test_launch_command_does_not_open_remote_origins(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakePopen:
+        pid = 1
+
+        def __init__(self, cmd, **kw):
+            captured['cmd'] = cmd
+
+    monkeypatch.setattr(mod, 'CHROME_PROFILE', str(tmp_path / 'profile'))
+    monkeypatch.setattr(mod.subprocess, 'Popen', FakePopen)
+    mod.launch_browser(4321)
+    assert not any(a.startswith('--remote-allow-origins') for a in captured['cmd'])
+    assert '--remote-debugging-port=4321' in captured['cmd']
+
+
+def test_reap_stops_only_the_browser_it_was_started_for(monkeypatch):
+    monkeypatch.setattr(mod.time, 'sleep', lambda s: None)
+    stopped = []
+    monkeypatch.setattr(mod, 'stop_serving', lambda: stopped.append(True) or 0)
+
+    monkeypatch.setattr(mod, 'read_endpoint', lambda: {'port': 10, 'pid': 20})
+    assert mod.reap(10, 20) == 0 and stopped == [True]
+
+    stopped.clear()
+    monkeypatch.setattr(mod, 'read_endpoint', lambda: {'port': 10, 'pid': 99})
+    assert mod.reap(10, 20) == 0 and stopped == []
+
+    monkeypatch.setattr(mod, 'read_endpoint', lambda: None)
+    assert mod.reap(10, 20) == 0 and stopped == []
