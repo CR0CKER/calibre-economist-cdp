@@ -13,6 +13,7 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - **L7** README carries a `Last updated` stamp and live CI, license and release badges.
 
 ### Fixed
+- Endpoint-location test asserted a flatpak-specific path and failed on any machine without the flatpak calibre (caught by the new CI). It now asserts the real invariant: the file lives in calibre's config dir and never under the browser's profile.
 - **H1** The DevTools port no longer passes `--remote-allow-origins=*`, which let any web page open on the machine connect and read the logged-in session. Origin-bearing clients are now refused by Chromium (verified: 403 on the handshake); the recipe's client sends no Origin and still connects.
 - **H1** `--serve` starts a detached reaper that closes the served browser after `ECONOMIST_SERVE_MAX_S` (default 45 min), so a crashed download cannot leave the port open indefinitely.
 - **L3** (partial) Swallowed exceptions on the best-effort shutdown and probe paths are now logged at debug level.

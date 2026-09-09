@@ -393,8 +393,14 @@ def test_endpoint_lives_outside_the_chromium_app_dir() -> None:
     An endpoint written under the Chromium app's directory is invisible to the
     recipe, which is exactly how this failed the first time.
     """
+    # The invariant is "in calibre's config dir, never in the browser's app
+    # tree" - not a literal flatpak path. Asserting the flatpak path passed only
+    # on a machine with the flatpak calibre installed and failed in CI, where
+    # calibre_config_dir() correctly falls back to ~/.config/calibre.
     assert 'ungoogled' not in mod.ENDPOINT_FILE
-    assert 'com.calibre_ebook.calibre' in mod.ENDPOINT_FILE
+    assert not mod.ENDPOINT_FILE.startswith(mod.CHROME_PROFILE)
+    assert mod.ENDPOINT_FILE == os.path.join(
+        session.calibre_config_dir(), 'economist-cdp-endpoint.json')
 
 
 # --- config-dir discovery and the session pointer file ----------------------
