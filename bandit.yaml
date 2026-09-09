@@ -1,0 +1,5 @@
+# bandit configuration. Test fixtures assert freely and contain synthetic cookie strings.
+exclude_dirs: [".venv", ".git", "__pycache__"]
+skips:
+  - B101   # assert in tests
+  - B603   # subprocess without shell: every call here is an argv list, no shell

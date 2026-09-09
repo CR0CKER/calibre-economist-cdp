@@ -1,0 +1,6 @@
+title = "calibre-economist-cdp"
+[extend]
+useDefault = true
+[allowlist]
+description = "synthetic cookie fixtures in unit tests"
+paths = ['''test_.*\.py$''']

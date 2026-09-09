@@ -258,7 +258,9 @@ Every one of these caused a silent failure during development.
 | `economist_chrome.py` | The navigator and fetch session: drives Chromium over CDP; `--serve` leaves it running. Contains a minimal RFC 6455 WebSocket client so there is nothing to install. |
 | `import_curl_cookies.py` | One-time import from a DevTools "Copy as cURL". |
 | `check_economist_access.py` | Standalone diagnostic: can these cookies reach the site? Runs under `calibre-debug`. |
-| `test_*.py` | Unit tests (63). `python -m pytest -q` |
+| `test_*.py` | Unit tests. Run via `scripts/gates.sh` |
+| `scripts/gates.sh` | The merge gates: `ruff`, `bandit`, `pytest`. CI runs exactly this script |
+| `requirements-dev.txt` | Hash-locked dev tools (pytest, ruff, bandit). Not needed at run time |
 
 Runtime state, all outside the repository:
 
@@ -283,6 +285,18 @@ flatpaks. Two things there are worth knowing even if you are elsewhere:
   crashes, removed WebGL from calibre's Chromium and was one of the two signals
   that got the device reclassified by DataDome. Driving an external browser
   sidesteps this too.
+
+## Development
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install --require-hashes -r requirements-dev.txt
+PATH=.venv/bin:$PATH scripts/gates.sh
+```
+
+CI (`.github/workflows/ci.yml`) runs the same script plus a gitleaks scan of the
+full history on every push and pull request, and is a required check on `main`.
+Commits are SSH-signed. Runtime code has no third-party dependencies; Dependabot
+watches the dev tools and the pinned actions.
 
 ## Attribution and license
 

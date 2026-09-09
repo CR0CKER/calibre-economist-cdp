@@ -45,9 +45,10 @@ import re
 import shutil
 import socket
 import struct
-import subprocess
+import subprocess  # nosec B404 - argv lists only, never a shell
 import sys
 import time
+import logging
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -103,6 +104,8 @@ SOLVE_TIMEOUT_S = 60.0
 POLL_INTERVAL_S = 1.0
 # Give a page that already looks good a moment to finish setting cookies.
 SETTLE_S = 2.0
+
+log = logging.getLogger('economist_chrome')
 
 _DD_RT = re.compile(r"'rt'\s*:\s*'(\w)'")
 
@@ -300,7 +303,7 @@ def wait_for_cdp(port: int, proc: subprocess.Popen) -> str:
         if proc.poll() is not None:
             raise SystemExit(f'ERROR: chromium exited early (rc={proc.returncode})')
         try:
-            with urllib.request.urlopen(url, timeout=2) as r:
+            with urllib.request.urlopen(url, timeout=2) as r:  # nosec B310 - literal http://127.0.0.1
                 return json.loads(r.read())['webSocketDebuggerUrl']
         except Exception:
             time.sleep(0.5)
@@ -331,7 +334,8 @@ def minimize_window(cdp: CDP, target_id: str) -> bool:
 
 def page_endpoint(port: int, target_id: str) -> str:
     """The page target's own websocket URL, from the DevTools HTTP endpoint."""
-    with urllib.request.urlopen(f'http://127.0.0.1:{port}/json/list', timeout=5) as r:
+    with urllib.request.urlopen(  # nosec B310 - literal loopback http URL
+            f'http://127.0.0.1:{port}/json/list', timeout=5) as r:
         for t in json.loads(r.read()):
             if t.get('id') == target_id:
                 return t['webSocketDebuggerUrl']
@@ -378,7 +382,7 @@ def stop_serving() -> int:
     try:
         # The browser websocket URL carries a UUID, so it has to be looked up
         # rather than constructed.
-        with urllib.request.urlopen(
+        with urllib.request.urlopen(  # nosec B310 - literal loopback http URL
                 f'http://127.0.0.1:{info["port"]}/json/version', timeout=3) as r:
             cdp = CDP(json.loads(r.read())['webSocketDebuggerUrl'])
     except Exception:
@@ -394,8 +398,8 @@ def stop_serving() -> int:
     else:
         try:
             cdp.call('Browser.close', timeout=5)
-        except Exception:
-            pass
+        except Exception as e:  # best effort: the pid fallback below still applies
+            log.debug('Browser.close failed: %r', e)
         cdp.close()
     try:
         os.unlink(ENDPOINT_FILE)
@@ -408,8 +412,8 @@ def shutdown(cdp: CDP | None, proc: subprocess.Popen | None) -> None:
     if cdp is not None:
         try:
             cdp.call('Browser.close', timeout=5)
-        except Exception:
-            pass
+        except Exception as e:  # teardown must not raise; terminate() follows
+            log.debug('Browser.close failed: %r', e)
         cdp.close()
     if proc is not None and proc.poll() is None:
         try:
@@ -559,7 +563,8 @@ def run(seed: bool = False, serve: bool = False) -> int:
             time.sleep(POLL_INTERVAL_S)
             try:
                 info = probe(cdp, session)
-            except Exception:
+            except Exception as e:  # mid-reload the page has no document yet
+                log.debug('probe failed, retrying: %r', e)
                 continue
             if info['next'] and not info['markers']:
                 time.sleep(SETTLE_S)
