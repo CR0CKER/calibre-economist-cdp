@@ -1,0 +1,11 @@
+# Local dev environment and caches
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+
+# Never commit credentials or downloaded editions
+*.epub
+economist_cookies.txt
+eco-curl.txt
+last-challenge.html

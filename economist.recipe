@@ -1,0 +1,935 @@
+#!/usr/bin/env  python
+import json
+import os
+import stat
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta
+
+from html5_parser import parse
+from lxml import etree
+from urllib.parse import urlparse
+
+from mechanize import Request
+
+from calibre import browser
+from calibre.utils.date import local_tz
+from calibre.web.feeds.news import BasicNewsRecipe
+
+# --------------------------------------------------------------------------
+# Cookie bridge
+#
+# economist.com sits behind a Cloudflare *managed* JS challenge plus DataDome.
+# Every plain HTTP client gets HTTP 403 regardless of User-Agent or headers, and
+# calibre's QtWebEngine scraper cannot help either: its backend never navigates
+# to the target URL (it sets a stub page and runs an in-page downloader), so the
+# challenge JavaScript never executes.
+#
+# The only workable route is to replay clearance and session cookies harvested
+# from a real logged-in browser. See README.md for the harvest procedure and
+# check_economist_access.py for the preflight check.
+#
+# SECURITY: these cookies are credentials. Never log their values - this recipe
+# logs cookie names and value lengths only.
+# --------------------------------------------------------------------------
+
+
+
+def _calibre_config_dir():
+    """calibre's config dir. Inside calibre this is authoritative; the
+    fallbacks mirror economist_session.calibre_config_dir() for test runs."""
+    try:
+        from calibre.constants import config_dir
+        return config_dir
+    except Exception:
+        pass
+    env = os.environ.get('CALIBRE_CONFIG_DIRECTORY')
+    if env:
+        return os.path.expanduser(env)
+    flatpak = os.path.expanduser('~/.var/app/com.calibre_ebook.calibre/config/calibre')
+    if os.path.isdir(flatpak):
+        return flatpak
+    return os.path.expanduser('~/.config/calibre')
+
+
+CONFIG_DIR = _calibre_config_dir()
+COOKIE_FILE = os.path.join(CONFIG_DIR, 'economist_cookies.txt')
+COOKIE_DOMAIN = '.economist.com'
+
+# Markers proving a response is an interstitial rather than the real page.
+CHALLENGE_MARKERS = (
+    b'captcha-delivery',   # DataDome
+    b'Just a moment',      # Cloudflare managed challenge
+    b'_cf_chl_opt',        # Cloudflare challenge payload
+    b'Please enable JS',   # DataDome noscript text
+)
+
+HARVEST_HINT = (
+    'Refresh them: open https://www.economist.com/weeklyedition in your browser, '
+    'let the challenge clear, then copy navigator.userAgent and the Cookie: '
+    'request header into ' + COOKIE_FILE + ' (see README.md). '
+    'Verify with check_economist_access.py before downloading.'
+)
+
+
+class CookiesUnusable(Exception):
+    """Raised when the cookie file is missing, malformed, or no longer accepted."""
+
+
+def parse_cookie_header(raw):
+    """Split a verbatim ``Cookie:`` header value into (name, value) pairs.
+
+    Values legitimately contain '=' (JWTs, base64 padding), so split on the
+    first '=' only. This mirrors parse_cookie_header in
+    check_economist_access.py - duplicated because a calibre recipe is a single
+    standalone file and cannot import from this directory. Keep the two in sync.
+    """
+    pairs = []
+    for chunk in raw.split(';'):
+        chunk = chunk.strip()
+        if not chunk or '=' not in chunk:
+            continue
+        name, _, value = chunk.partition('=')
+        name = name.strip()
+        if name:
+            pairs.append((name, value.strip()))
+    return pairs
+
+
+_creds_cache = None
+
+
+def load_credentials(path=COOKIE_FILE):
+    """Return (user_agent, cookies) from the cookie file, cached per run."""
+    global _creds_cache
+    if _creds_cache is not None:
+        return _creds_cache
+
+    if not os.path.exists(path):
+        raise CookiesUnusable('Cookie file not found: ' + path + '. ' + HARVEST_HINT)
+
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    if mode & (stat.S_IRWXG | stat.S_IRWXO):
+        raise CookiesUnusable(
+            path + ' is group/world readable. These cookies are credentials. '
+            'Fix with: chmod 600 ' + path
+        )
+
+    user_agent = ''
+    cookie_header = ''
+    with open(path, encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            key, _, value = line.partition('=')
+            key = key.strip().upper()
+            if key == 'USER_AGENT':
+                user_agent = value.strip()
+            elif key == 'COOKIE':
+                cookie_header = value.strip()
+
+    if not user_agent or user_agent.startswith('<'):
+        raise CookiesUnusable('USER_AGENT missing or still a placeholder in ' + path)
+    if not cookie_header or cookie_header.startswith('<'):
+        raise CookiesUnusable('COOKIE missing or still a placeholder in ' + path)
+
+    cookies = parse_cookie_header(cookie_header)
+    if not cookies:
+        raise CookiesUnusable('COOKIE line in ' + path + ' parsed to zero cookies')
+
+    _creds_cache = (user_agent, cookies)
+    return _creds_cache
+
+
+# --------------------------------------------------------------------------
+# Session refresh
+#
+# The cookies in COOKIE_FILE are a snapshot of values the site rotates
+# constantly - __cf_bm survives only 30 minutes. Rather than ask for a fresh
+# browser export before every download, economist_session.py keeps a persistent
+# QtWebEngine profile and renews them by actually visiting the site. Running it
+# here is what makes unattended, scheduled downloads possible.
+# --------------------------------------------------------------------------
+
+
+
+def _find_session_script():
+    """Locate economist_session.py without a hard-coded path.
+
+    1. ECONOMIST_SESSION_SCRIPT in the environment.
+    2. The pointer file economist_session.py writes into calibre's config dir
+       every time it runs (so running --seed once is enough).
+    3. A conventional checkout location, as a last resort.
+    """
+    env = os.environ.get('ECONOMIST_SESSION_SCRIPT')
+    if env:
+        return os.path.expanduser(env)
+    try:
+        with open(os.path.join(CONFIG_DIR, 'economist-session.path'), encoding='utf-8') as f:
+            recorded = f.read().strip()
+        if recorded:
+            return recorded
+    except OSError:
+        pass
+    return os.path.expanduser('~/calibre-economist-cdp/economist_session.py')
+
+
+SESSION_SCRIPT = _find_session_script()
+REFRESH_TIMEOUT_S = 300
+
+_refreshed = False
+
+
+def refresh_command():
+    """How to invoke the session script from wherever this recipe is running.
+
+    The refresh drives ungoogled-chromium, which lives in its own flatpak, so it
+    has to run on the host - calibre's bundled Qt is no longer involved. From
+    inside calibre's sandbox that means flatpak-spawn, which needs
+    ``org.freedesktop.Flatpak=talk``:
+
+        flatpak override --user --talk-name=org.freedesktop.Flatpak \
+            com.calibre_ebook.calibre
+    """
+    return _spawn(['--serve'])
+
+
+def stop_command():
+    """Shut down the browser that --serve left running."""
+    return _spawn(['--stop'])
+
+
+def _spawn(args):
+    if os.path.exists('/.flatpak-info'):
+        # --directory is not optional. flatpak-spawn hands the host the sandbox's
+        # current directory, which during a fetch is a private /tmp/calibre-*
+        # path that does not exist outside the sandbox, and the portal then
+        # refuses to start the command at all.
+        return ['/usr/bin/flatpak-spawn', '--host',
+                '--directory=' + os.path.dirname(SESSION_SCRIPT),
+                '/usr/bin/python3', SESSION_SCRIPT] + args
+    return ['python3', SESSION_SCRIPT] + args
+
+
+def refresh_session(log):
+    """Renew the short-lived cookies. Best-effort: fall back to the stored file."""
+    global _refreshed, _creds_cache
+    if _refreshed:
+        return
+    _refreshed = True
+
+    if not os.path.exists(SESSION_SCRIPT):
+        log('No session script at', SESSION_SCRIPT, '- using stored cookies as-is.')
+        return
+
+    try:
+        proc = subprocess.run(
+            refresh_command(),
+            capture_output=True, text=True, timeout=REFRESH_TIMEOUT_S,
+        )
+    except Exception as e:
+        log('Cookie refresh could not run:', e, '- using stored cookies.')
+        return
+
+    for line in (proc.stdout or '').splitlines():
+        if line.startswith(('Browser:', 'Navigated', 'Wrote', 'Session still',
+                            'Window minimized', 'Serving CDP',
+                            'Cookies in profile', 'ERROR')):
+            log('session:', line)
+    if proc.returncode != 0:
+        log('Cookie refresh reported failure; falling back to stored cookies.')
+        for line in (proc.stderr or '').splitlines()[-3:]:
+            log('session stderr:', line)
+        return
+
+    # The file on disk has changed, so drop anything already parsed from it.
+    _creds_cache = None
+
+def is_challenge(raw):
+    """True if the response body is a bot-challenge interstitial."""
+    return any(marker in raw for marker in CHALLENGE_MARKERS)
+
+
+def cookie_browser(user_agent, cookies):
+    """A mechanize browser carrying the harvested UA and cookies."""
+    br = browser(user_agent=user_agent)
+    for name, value in cookies:
+        br.set_simple_cookie(name, value, COOKIE_DOMAIN)
+    return br
+
+
+_webengine_browser = None
+
+# Which transport is known to work: None (undecided), 'mechanize' or 'webengine'.
+_transport = None
+
+
+def webengine_cookie_browser(user_agent, cookies):
+    """A QtWebEngine browser with the same cookies.
+
+    Chromium's TLS fingerprint is closer to a real browser than Python's, so this
+    is the fallback when Cloudflare rejects the mechanize transport. Created once
+    per run - each instance spawns a worker process.
+    """
+    global _webengine_browser
+    if _webengine_browser is None:
+        from calibre.scraper.qt import WebEngineBrowser
+
+        br = WebEngineBrowser(user_agent=user_agent, verify_ssl_certificates=False)
+        br.set_user_agent(user_agent)
+        for name, value in cookies:
+            br.set_simple_cookie(name, value, COOKIE_DOMAIN)
+        _webengine_browser = br
+    return _webengine_browser
+
+
+# --------------------------------------------------------------------------
+# CDP transport
+#
+# calibre's own QtWebEngine worker segfaults inside libQt6WebEngineCore on some
+# machines (Asahi Linux, aarch64). Worse than crashing, it *hangs* the download:
+# the job keeps zombie children and burns no CPU, forever. Three cheaper fixes were tried and all
+# failed - plain mechanize still 403s (curl's success is not transferable,
+# Python's TLS handshake is rejected), --use-gl=swiftshader is unsupported by
+# this build, and simultaneous_downloads = 1 still spawned two workers and still
+# crashed.
+#
+# So calibre's browser is replaced outright. economist_session.py --serve leaves
+# the real Chromium running and publishes its DevTools endpoint;
+# everything below fetches through that session with an in-page fetch(). Same
+# cookies, same TLS fingerprint, same origin, and no QtWebEngine anywhere.
+# --------------------------------------------------------------------------
+
+WORKSPACE = os.path.dirname(SESSION_SCRIPT)
+
+# Read the whole body as base64 so one code path serves HTML and images alike.
+# The chunked String.fromCharCode is not decoration: applying it to a whole
+# multi-megabyte Uint8Array blows the JS argument limit.
+_FETCH_JS = """
+(async () => {
+  try {
+    const r = await fetch(%s, {credentials: 'include', redirect: 'follow'});
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    let bin = ''; const CH = 0x8000;
+    for (let i = 0; i < bytes.length; i += CH)
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+    return JSON.stringify({ok: true, status: r.status, url: r.url,
+                           type: r.headers.get('content-type') || '',
+                           b64: btoa(bin)});
+  } catch (e) {
+    return JSON.stringify({ok: false, error: String(e)});
+  }
+})()
+"""
+
+
+class CDPBrowser(object):
+    """A calibre-compatible browser backed by the served Chromium session.
+
+    Mirrors the surface calibre's fetcher uses from WebEngineBrowser: open,
+    open_novisit, clone_browser, set_simple_cookie, set_user_agent, shutdown,
+    is_method_ok.
+    """
+
+    def __init__(self, ws_url, user_agent, log=None):
+        import threading
+
+        from economist_chrome import CDP
+        self._cdp = CDP(ws_url)
+        self._lock = threading.Lock()
+        self._ua = user_agent
+        self._log = log
+
+    @staticmethod
+    def _target(url_or_request):
+        return getattr(url_or_request, 'get_full_url', lambda: url_or_request)()
+
+    @staticmethod
+    def _same_origin(url):
+        """True for URLs the in-page fetch() is allowed to make.
+
+        The fetch runs inside a www.economist.com page, so anything off that
+        origin is blocked by CORS and comes back as 'TypeError: Failed to
+        fetch'. That is not a problem to solve - third-party assets (the
+        masthead logo, for instance) are not behind the bot wall and need none
+        of this session's credentials, so they go out over plain HTTP instead.
+        """
+        try:
+            host = urlparse(url).hostname or ''
+        except Exception:
+            return False
+        return host == 'economist.com' or host.endswith('.economist.com')
+
+    def _plain_open(self, url, timeout):
+        """Ordinary urllib fetch, for third-party assets."""
+        import urllib.request
+        req = urllib.request.Request(url, headers={'User-Agent': self._ua})
+        return urllib.request.urlopen(req, timeout=timeout or 60)
+
+    def open_novisit(self, url_or_request, data=None, timeout=None):
+        import base64
+        import io
+        import urllib.error
+        from email.message import Message
+        from urllib.response import addinfourl
+
+        url = self._target(url_or_request)
+        if not self._same_origin(url):
+            return self._plain_open(url, timeout)
+
+        # One websocket, so calls have to be serialised. Each fetch is a single
+        # round trip measured in tenths of a second, so this is not a bottleneck.
+        with self._lock:
+            res = self._cdp.call(
+                'Runtime.evaluate',
+                {'expression': _FETCH_JS % json.dumps(url),
+                 'awaitPromise': True, 'returnByValue': True},
+                timeout=(timeout or 120))
+        value = res.get('result', {}).get('value')
+        if not value:
+            raise urllib.error.URLError('no response from the browser for ' + url)
+        d = json.loads(value)
+        if not d.get('ok'):
+            raise urllib.error.URLError(d.get('error', 'fetch failed') + ' for ' + url)
+
+        raw = base64.b64decode(d['b64'])
+        headers = Message()
+        headers['Content-Type'] = d.get('type') or 'application/octet-stream'
+        if d['status'] >= 400:
+            raise urllib.error.HTTPError(
+                d.get('url') or url, d['status'],
+                'HTTP Error %d' % d['status'], headers, io.BytesIO(raw))
+        return addinfourl(io.BytesIO(raw), headers, d.get('url') or url, d['status'])
+
+    open = open_novisit
+
+    def clone_browser(self):
+        # One browser session shared by every thread; the lock makes that safe.
+        return self
+
+    def set_simple_cookie(self, name, value, domain=None, path='/'):
+        pass          # cookies live in the Chromium profile already
+
+    def set_cookie(self, *args, **kwargs):
+        pass
+
+    def set_user_agent(self, val=''):
+        pass          # the browser's own UA is the one we want
+
+    def is_method_ok(self, method):
+        return method.upper() == 'GET'
+
+    def shutdown(self):
+        try:
+            self._cdp.close()
+        except Exception:
+            pass
+
+
+_cdp_browser = None
+
+
+def cdp_browser(log=None):
+    """The shared CDP browser, or None if --serve did not leave one running."""
+    global _cdp_browser
+    if _cdp_browser is not None:
+        return _cdp_browser
+    if WORKSPACE not in sys.path:
+        sys.path.insert(0, WORKSPACE)
+    try:
+        from economist_chrome import read_endpoint
+        info = read_endpoint()
+        if not info:
+            return None
+        _cdp_browser = CDPBrowser(info['ws'], load_credentials()[0], log)
+    except Exception as e:
+        if log:
+            log('CDP transport unavailable:', e)
+        return None
+    return _cdp_browser
+
+
+def safe_dict(data, *names):
+    ans = data
+    for x in names:
+        ans = ans.get(x) or {}
+    return ans
+
+
+def process_web_list(li_node):
+    li_html = ''
+    for li in li_node['items']:
+        if li.get('textHtml'):
+            li_html += f'<li>{li["textHtml"]}</li>'
+        elif li.get('textJson'):
+            li_html += f'<li>{parse_textjson(li["textJson"])}</li>'
+        else:
+            li_html += f'<li>{li.get("text", "")}</li>'
+    return '<ul>' + li_html + '</ul>'
+
+
+def process_info_box(bx):
+    info = ''
+    for x in safe_dict(bx, 'components'):
+        info += f'<blockquote>{process_web_node(x)}</blockquote>'
+    return info
+
+
+def parse_txt(ty):
+    typ = ty.get('type', '')
+    children = ty.get('children', [])
+    href = '#'
+    attributes = ty.get('attributes') or ()
+    for a in attributes:
+        if a.get('name') == 'href':
+            href = a.get('value', href)
+            break
+
+    tag_map = {
+        'text': lambda: [ty.get('value', '')],
+        'scaps': lambda: [
+            f'<span style="text-transform: uppercase; font-size: 0.85em; letter-spacing: 0.05em;">{"".join(parse_txt(c))}</span>' for c in children
+        ],
+        'bold': lambda: [f'<b>{"".join(parse_txt(c))}</b>' for c in children],
+        'drop_caps': lambda: [f'<b>{"".join(parse_txt(c))}</b>' for c in children],
+        'italic': lambda: [f'<i>{"".join(parse_txt(c))}</i>' for c in children],
+        'linebreak': lambda: ['<br>'],
+        'external_link': lambda: [f'<a href="{href}">{"".join(parse_txt(c))}</a>' for c in children],
+        'internal_link': lambda: [f'<a href="{href}">{"".join(parse_txt(c))}</a>' for c in children],
+        'ufinish': lambda: [text for c in children for text in parse_txt(c)],
+        'subscript': lambda: [f'<sub>{"".join(parse_txt(c))}</sub>' for c in children],
+        'superscript': lambda: [f'<sup>{"".join(parse_txt(c))}</sup>' for c in children],
+    }
+
+    if typ in tag_map:
+        yield from tag_map[typ]()
+    else:
+        print('** ', typ)
+
+
+def parse_textjson(nt):
+    return ''.join(''.join(parse_txt(n)) for n in nt)
+
+
+def process_web_node(node):
+    ntype = node.get('type', '')
+    if ntype == 'CROSSHEAD':
+        if node.get('textHtml'):
+            return f'<h4>{node.get("textHtml")}</h4>'
+        return f'<h4>{node.get("text", "")}</h4>'
+    elif ntype in ['PARAGRAPH', 'BOOK_INFO']:
+        if node.get('textHtml'):
+            return f'\n<p>{node.get("textHtml")}</p>'
+        elif node.get('textJson'):
+            return f'\n<p>{parse_textjson(node["textJson"])}</p>'
+        return f'\n<p>{node.get("text", "")}</p>'
+    elif (ntype == 'IMAGE') or (node.get('__typename', '') == 'ImageComponent'):
+        alt = '' if node.get('altText') is None else node.get('altText')
+        cap = ''
+        if node.get('caption'):
+            if node['caption'].get('textHtml') is not None:
+                cap = node['caption']['textHtml']
+            elif node['caption'].get('textJson') is not None:
+                cap = parse_textjson(node['caption']['textJson'])
+            elif node['caption'].get('text') is not None:
+                cap = node['caption']['text']
+        return f'<div><img src="{node["url"]}" title="{alt}"></div><div style="text-align:center; font-size:small;">{cap}</div>'
+    elif ntype == 'PULL_QUOTE':
+        if node.get('textHtml'):
+            return f'<blockquote>{node.get("textHtml")}</blockquote>'
+        elif node.get('textJson'):
+            return f'<blockquote>{parse_textjson(node["textJson"])}</blockquote>'
+        return f'<blockquote>{node.get("text", "")}</blockquote>'
+    elif ntype == 'BLOCK_QUOTE':
+        if node.get('textHtml'):
+            return f'<blockquote><i>{node.get("textHtml")}</i></blockquote>'
+        elif node.get('textJson'):
+            return f'<blockquote><i>{parse_textjson(node["textJson"])}</i></blockquote>'
+        return f'<blockquote><i>{node.get("text", "")}</i></blockquote>'
+    elif ntype == 'DIVIDER':
+        return '<hr>'
+    elif ntype == 'INFOGRAPHIC':
+        if node.get('fallback'):
+            return process_web_node(node['fallback'])
+    elif ntype == 'INFOBOX':
+        return process_info_box(node)
+    elif ntype == 'UNORDERED_LIST':
+        if node.get('items'):
+            return process_web_list(node)
+    elif ntype:
+        print('** ', ntype)
+    return ''
+
+
+def load_article_from_json(raw):
+    # open('/t/raw.json', 'w').write(raw)
+    body = ''
+    try:
+        data = json.loads(raw)['data']['findArticleByUrl']
+    except Exception:
+        try:
+            data = json.loads(raw)['props']['pageProps']['cp2Content']
+        except Exception:
+            data = json.loads(raw)['props']['pageProps']['content']
+
+    body += f'<div style="color: red; font-size:small; font-weight:bold;">{data.get("flyTitle", "")}</div>'
+    body += f'<h1>{data["headline"]}</h1>'
+    if data.get('rubric') and data.get('rubric') is not None:
+        body += f'<div style="font-style: italic; color:#202020;">{data.get("rubric", "")}</div>'
+    try:
+        date = data['dateModified']
+    except Exception:
+        date = data['datePublished']
+    dt = datetime.fromisoformat(date[:-1]) + timedelta(seconds=time.timezone)
+    dt = dt.strftime('%b %d, %Y %I:%M %p')
+    if data.get('dateline') is None:
+        body += f'<p style="color: gray; font-size: small;">{dt}</p>'
+    else:
+        body += f'<p style="color: gray; font-size: small;">{dt + " | " + (data["dateline"])}</p>'
+    main_image_url = safe_dict(data, 'leadComponent') or ''
+    if main_image_url:
+        body += process_web_node(data['leadComponent'])
+    if data.get('byline'):
+        if data['byline'] is not None:
+            body += f'<p style="color: gray; font-size: small;"><i>{"By " + data["byline"]}</i></p>'
+    for node in data.get('body'):
+        body += process_web_node(node)
+    return '<html><body><article>' + body + '</article></body></html>'
+
+
+class NoArticles(Exception):
+    pass
+
+
+# Upstream appends these to strip site chrome and adverts from the returned page.
+APP_VIEW_PARAMS = '?app=core%2Cfocused&no-chrome=key&no-adverts=key&webview=liskov'
+
+
+def get_content(url):
+    """Fetch a page as the harvested browser session.
+
+    Both the edition index and every article flow through here, so this is the
+    single place cookies need to be applied. Tries the cheap mechanize transport
+    first and falls back to QtWebEngine, whose Chromium TLS fingerprint is more
+    likely to be accepted if Cloudflare binds clearance to it.
+    """
+    user_agent, cookies = load_credentials()
+    full_url = url + APP_VIEW_PARAMS
+    headers = {
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'accept-language': 'en-US,en;q=0.9',
+        'upgrade-insecure-requests': '1',
+    }
+
+    # The CDP session is the transport. mechanize and QtWebEngine remain below
+    # only as a fallback for when --serve could not leave a browser running.
+    br = cdp_browser()
+    if br is not None:
+        raw = br.open_novisit(full_url, timeout=120).read()
+        if raw and not is_challenge(raw):
+            return raw
+        raise CookiesUnusable(
+            'Blocked by the bot challenge on ' + url + ' via the browser '
+            'session - the cookies are expired or no longer accepted. '
+            + HARVEST_HINT
+        )
+
+    global _transport
+    raw = b''
+    mechanize_error = None
+
+    # Cloudflare binds clearance to the TLS fingerprint, so the mechanize
+    # transport is normally rejected with a 403 even with valid cookies. Try it
+    # once because it is much cheaper, then remember the answer: retrying it for
+    # every article would add a wasted round-trip per article.
+    if _transport in (None, 'mechanize'):
+        try:
+            br = cookie_browser(user_agent, cookies)
+            raw = br.open(Request(full_url, headers=headers)).read()
+        except Exception as e:
+            # A challenge surfaces as HTTP 403, which mechanize raises rather
+            # than returns, so a failure here is expected; fall through.
+            raw = b''
+            mechanize_error = e
+        if raw and not is_challenge(raw):
+            _transport = 'mechanize'
+            return raw
+        _transport = 'webengine'
+
+    try:
+        br = webengine_cookie_browser(user_agent, cookies)
+        raw = br.open_novisit(full_url, timeout=90).read()
+    except Exception as e:
+        raise CookiesUnusable(
+            'Both transports failed for ' + url + '. mechanize: '
+            + repr(mechanize_error) + ' webengine: ' + repr(e) + '. ' + HARVEST_HINT
+        )
+
+    if not raw or is_challenge(raw):
+        raise CookiesUnusable(
+            'Blocked by the bot challenge on ' + url + ' - the cookies are '
+            'expired or no longer accepted. ' + HARVEST_HINT
+        )
+    return raw
+
+
+def process_url(url):
+    if url.startswith('/'):
+        url = 'https://www.economist.com' + url
+    return url
+
+
+class Economist(BasicNewsRecipe):
+    title = 'The Economist'
+    language = 'en_GB'
+    encoding = 'utf-8'
+    masthead_url = 'https://www.livemint.com/lm-img/dev/economist-logo-oneline.png'
+
+    __author__ = 'Kovid Goyal, unkn0wn, CR0CKER'
+    description = (
+        'Global news and current affairs from a European perspective. '
+        'Requires browser cookies - see README.md.'
+    )
+    extra_css = '''
+        em { color:#202020; }
+        img {display:block; margin:0 auto;}
+    '''
+
+    resolve_internal_links = True
+
+    delay = 2
+    # No browser_type. get_browser returns a CDPBrowser driving the real
+    # Chromium 151 session, so calibre never starts a QtWebEngine worker and
+    # the segfault-then-hang failure mode cannot occur.
+    #
+    # mechanize is NOT an option and never was: Cloudflare binds clearance to
+    # the TLS fingerprint. Retested 2026-09-03 with freshly earned cookies -
+    # `curl` with those cookies gets HTTP 200 on the index, articles and images,
+    # but calibre's mechanize gets 403 on the very same URLs (316 failures, 0
+    # articles). curl's TLS handshake passes where Python's does not, so curl is
+    # not a valid proxy for that decision. Chromium's handshake is the real one.
+    recipe_specific_options = {
+        'date': {
+            'short': 'The date of the edition to download (YYYY-MM-DD format)',
+            'long': 'For example, 2024-07-19',
+        },
+        'res': {
+            'short': 'For hi-res images, select a resolution from the\nfollowing options: 834, 960, 1096, 1280, 1424',
+            'long': 'This is useful for non e-ink devices, and for a lower file size\nthan the default, use from 480, 384, 360, 256.',
+            'default': '600',
+        },
+    }
+
+    def get_browser(self, *args, **kwargs):
+        """The browser calibre uses for articles and images.
+
+        Normally the CDP session that --serve left running. If that could not be
+        started, fall back to calibre's mechanize browser carrying the harvested
+        cookies - it will very likely 403, but failing loudly beats hanging.
+        """
+        refresh_session(self.log)
+        user_agent, cookies = load_credentials()
+        self.last_used_ua = user_agent
+
+        br = cdp_browser(self.log)
+        if br is not None:
+            self.log('Fetching through the Chromium session (no QtWebEngine).')
+            return br
+
+        self.log('WARNING: no browser session; falling back to mechanize.')
+        kwargs['user_agent'] = user_agent
+        br = BasicNewsRecipe.get_browser(self, *args, **kwargs)
+        for name, value in cookies:
+            br.set_simple_cookie(name, value, COOKIE_DOMAIN)
+        return br
+
+    def cleanup(self):
+        """Release the browser session after the download.
+
+        A leftover worker or browser is a child process that keeps the converter
+        alive; without this, ebook-convert hangs after writing the book.
+        """
+        br = getattr(self, 'browser', None)
+        if br is not None and hasattr(br, 'shutdown'):
+            try:
+                br.shutdown()
+            except Exception as e:
+                self.log('Failed to shut down the recipe browser:', e)
+
+        global _webengine_browser
+        if _webengine_browser is not None:
+            try:
+                _webengine_browser.shutdown()
+            except Exception as e:
+                self.log('Failed to shut down the WebEngine browser:', e)
+            _webengine_browser = None
+
+        global _cdp_browser
+        if _cdp_browser is not None:
+            try:
+                _cdp_browser.shutdown()
+            except Exception as e:
+                self.log('Failed to close the CDP connection:', e)
+            _cdp_browser = None
+
+        # Stop the served Chromium, or it outlives the download.
+        try:
+            subprocess.run(stop_command(), capture_output=True, text=True,
+                           timeout=60)
+        except Exception as e:
+            self.log('Could not stop the browser session:', e)
+
+    def canonicalize_internal_url(self, url, is_link=True):
+        if url.endswith('/print'):
+            url = url.rpartition('/')[0]
+        return BasicNewsRecipe.canonicalize_internal_url(self, url, is_link=is_link)
+
+    def publication_date(self):
+        edition_date = self.recipe_specific_options.get('date')
+        if isinstance(edition_date, str):
+            edition_date = edition_date.strip()
+        if edition_date and isinstance(edition_date, str):
+            return datetime.strptime(edition_date, '%Y-%m-%d').replace(tzinfo=local_tz)
+        try:
+            url = self.browser.open('https://www.economist.com/printedition').geturl()
+            date_str = url.split('/')[-1]
+            return datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=local_tz)
+        except Exception as e:
+            self.log('Failed to fetch publication date from website with error: ' + str(e))
+            return super().publication_date()
+
+    def get_obfuscated_article(self, url):
+        return {'data': get_content(url), 'url': url}
+
+    def economist_return_index(self, ans):
+        if not ans:
+            raise NoArticles(
+                'Could not find any articles, either the '
+                'economist.com server is having trouble and you should '
+                'try later or the website format has changed and the '
+                'recipe needs to be updated.'
+            )
+        return ans
+
+    def economist_test_article(self):
+        return [('Articles', [{'title': 'test', 'url': 'https://www.economist.com/international/2026/07/23/the-geopolitics-of-air-conditioning'}])]
+
+    def parse_index(self):
+        # return self.economist_test_article()
+        edition_date = self.recipe_specific_options.get('date')
+        if isinstance(edition_date, str):
+            edition_date = edition_date.strip()
+        if edition_date and isinstance(edition_date, str):
+            url = 'https://www.economist.com/weeklyedition/' + edition_date
+            self.timefmt = ' [' + edition_date + ']'
+        else:
+            edition_date = None
+            url = 'https://www.economist.com/weeklyedition'
+        # No fallback path exists any more: upstream's GraphQL gateway
+        # (cp2-graphql-gateway.p.aws.economist.com) no longer resolves - it is
+        # NXDOMAIN - so a second attempt could only ever add a confusing
+        # traceback. Let the real error surface instead.
+        ans = self.economist_parse_index(url)
+        return self.economist_return_index(ans)
+
+    def economist_parse_index(self, url):
+        soup = self.index_to_soup(get_content(url))
+        script_tag = soup.find('script', id='__NEXT_DATA__')
+        # The old random-UA retry is gone: the block is a JS challenge, not a UA
+        # filter, so retrying with a different UA cannot help. get_content already
+        # falls back to the WebEngine transport and raises a clear error.
+        if script_tag is None:
+            return []
+        data = json.loads(script_tag.string)
+        # open('/t/raw.json', 'w').write(json.dumps(data, indent=2, sort_keys=True))
+
+        self.description = safe_dict(data, 'props', 'pageProps', 'content', 'headline')
+        self.timefmt = ' [' + safe_dict(data, 'props', 'pageProps', 'content', 'formattedIssueDate') + ']'
+        self.cover_url = (
+            safe_dict(data, 'props', 'pageProps', 'content', 'cover', 'url')
+            .replace(
+                'economist.com/',
+                'economist.com/cdn-cgi/image/width=960,quality=80,format=auto/',
+            )
+            .replace('SQ_', '')
+            .replace('_AS', '_AP')
+        )
+        self.log('Got cover:', self.cover_url)
+
+        feeds = []
+        seen = set()
+        for component in safe_dict(data, 'props', 'pageProps', 'content', 'components'):
+            match component.get('type'):
+                case 'AD':
+                    continue
+                case 'COLLECTION':
+                    articles = []
+                    section = component['name']
+                    self.log(section)
+                    # Upstream nests this loop inside an identical one, which is a
+                    # typo: it reuses the same loop variable, so it iterates the
+                    # section quadratically. The 'seen' set keeps the output
+                    # correct, so this is a de-duplication of the loop only.
+                    for article in component['articles']:
+                        if article['id'] in seen:
+                            continue
+                        seen.add(article['id'])
+                        title = article['headline']
+                        url = process_url(article['url'])
+                        sub = article.get('flyTitle') or ''
+                        desc = article.get('rubric') or ''
+                        if sub and section != sub:
+                            desc = sub + ' :: ' + desc
+                        self.log('\t', title, '\n\t', desc, '\n\t\t', url)
+                        articles.append({'title': title, 'url': url, 'description': desc})
+                    if articles:
+                        feeds.append((section, articles))
+
+        return feeds
+
+    def preprocess_html(self, soup):
+        width = '600'
+        w = self.recipe_specific_options.get('res')
+        if w and isinstance(w, str):
+            width = w
+        for img in soup.findAll('img', src=True):
+            qua = 'economist.com/cdn-cgi/image/width=' + width + ',quality=80,format=auto/'
+            img['src'] = img['src'].replace('economist.com/', qua)
+        return soup
+
+    def preprocess_raw_html(self, raw_html, url):
+        # open('/t/raw.html', 'wb').write(raw.encode('utf-8'))
+        if '/interactive/' in url:
+            return '<html><body><article><h1>Article not available.</h1><em>This article is supposed to be read in a browser.</em></article></body></html>'
+        root_ = parse(raw_html)
+        script = root_.xpath('//script[@id="__NEXT_DATA__"]')
+        html = load_article_from_json(script[0].text)
+        root = parse(html)
+
+        for x in root.xpath('//*[name()="script" or name()="style" or name()="source" or name()="meta"]'):
+            x.getparent().remove(x)
+        # the economist uses <small> for small caps with a custom font
+        for init in root.xpath('//span[@data-caps="initial"]'):
+            init.set('style', 'font-weight:bold;')
+        for x in root.xpath('//small'):
+            if x.text and len(x) == 0:
+                x.text = x.text.upper()
+                x.tag = 'span'
+                x.set(
+                    'style',
+                    'text-transform: uppercase; font-size: 0.85em; letter-spacing: 0.05em;',
+                )
+        for h2 in root.xpath('//h2'):
+            h2.tag = 'h4'
+        for x in root.xpath('//figcaption'):
+            x.set('style', 'text-align:center; font-size:small;')
+        for x in root.xpath('//cite'):
+            x.tag = 'blockquote'
+            x.set('style', 'color:#404040;')
+        raw = etree.tostring(root, encoding='unicode')
+        return raw
+
+
+calibre_most_common_ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36'
