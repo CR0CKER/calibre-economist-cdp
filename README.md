@@ -1,5 +1,11 @@
 # The Economist for calibre, through your own Chromium
 
+Last updated: 2026-09-09 09:30 AM CDT
+
+[![ci](https://github.com/CR0CKER/calibre-economist-cdp/actions/workflows/ci.yml/badge.svg)](https://github.com/CR0CKER/calibre-economist-cdp/actions/workflows/ci.yml)
+[![license](https://img.shields.io/github/license/CR0CKER/calibre-economist-cdp)](LICENSE)
+[![release](https://img.shields.io/github/v/release/CR0CKER/calibre-economist-cdp)](https://github.com/CR0CKER/calibre-economist-cdp/releases)
+
 A working replacement for calibre's built-in **The Economist** news recipe, which has
 been blocked since late August 2026. It downloads a full weekly edition, with
 images, automatically and on a schedule, by letting calibre fetch through a real
@@ -304,4 +310,5 @@ Recipe parsing code descends from calibre's built-in `economist.recipe` by Kovid
 Goyal and unkn0wn. The session and CDP layers were developed with the assistance of
 [Claude Code](https://claude.com/claude-code).
 
-GPLv3, like calibre's recipes. See `LICENSE`.
+GPLv3, like calibre's recipes. Full text in `LICENSE`; the copyright notice and
+upstream attribution are in `COPYRIGHT`.
