@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """Preflight check: can calibre reach economist.com with the harvested cookies?
 
 economist.com sits behind a Cloudflare *managed* JS challenge plus DataDome. No

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """Persistent browser session for The Economist calibre recipe.
 
 Why this exists
