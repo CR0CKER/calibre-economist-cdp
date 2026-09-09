@@ -289,7 +289,7 @@ def webengine_cookie_browser(user_agent, cookies):
 # CDP transport
 #
 # calibre's own QtWebEngine worker segfaults inside libQt6WebEngineCore on some
-# machines (Asahi Linux, aarch64). Worse than crashing, it *hangs* the download:
+# machines (Fedora, aarch64). Worse than crashing, it *hangs* the download:
 # the job keeps zombie children and burns no CPU, forever. Three cheaper fixes were tried and all
 # failed - plain mechanize still 403s (curl's success is not transferable,
 # Python's TLS handshake is rejected), --use-gl=swiftshader is unsupported by

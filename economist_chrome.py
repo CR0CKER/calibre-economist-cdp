@@ -10,7 +10,7 @@ the user's actual browser), and calibre's flatpak override passes
 UA versus ``Sec-CH-UA`` client hints, and the absence of WebGL - and on
 2026-09-03 it reclassified the device and began serving an interstitial
 challenge (``x-dd-b``, ``rt:'i'``) to every request. On top of that, QtWebEngine
-SIGSEGVs on some machines (Asahi Linux, aarch64), so navigation often died outright.
+SIGSEGVs on some machines (Fedora, aarch64), so navigation often died outright.
 
 The machine already had the browser the User-Agent was claiming to be:
 ``io.github.ungoogled_software.ungoogled_chromium`` 151. Driving *that* over the

@@ -25,12 +25,12 @@ downloaded editions are or will be distributed.
 - [Troubleshooting](#troubleshooting)
 - [Known limitations](#known-limitations)
 - [Files](#files)
-- [Platform notes: flatpak and Asahi Linux](#platform-notes-flatpak-and-asahi-linux)
+- [Platform notes: flatpak and Fedora Linux](#platform-notes-flatpak-and-fedora-linux)
 - [Attribution and license](#attribution-and-license)
 
 ## Why the built-in recipe is dead
 
-economist.com sits behind **two** bot walls, not one:
+economist.com sits behind **two** bot walls:
 
 | Request | Response |
 |---|---|
@@ -174,7 +174,7 @@ recipe reads them from disk at run time.
 
 ## Everyday use
 
-Nothing. Download the recipe in calibre as usual; it refreshes the session itself,
+Download the recipe in calibre as usual; it refreshes the session itself,
 so scheduled unattended downloads work.
 
 To inspect or refresh by hand:
@@ -267,9 +267,9 @@ Runtime state, all outside the repository:
 | `<calibre config>/economist-cdp-endpoint.json` | The live DevTools endpoint while a download runs. |
 | `<profile dir>/` | The dedicated Chromium profile, `0700`. |
 
-## Platform notes: flatpak and Asahi Linux
+## Platform notes: flatpak and Fedora Linux
 
-This was built on Fedora Asahi Remix (aarch64) with calibre and Chromium both as
+This was built on Fedora (aarch64) with calibre and Chromium both as
 flatpaks. Two things there are worth knowing even if you are elsewhere:
 
 - On that machine calibre's own QtWebEngine worker (`calibre-parallel`) segfaults
@@ -286,6 +286,6 @@ flatpaks. Two things there are worth knowing even if you are elsewhere:
 
 Recipe parsing code descends from calibre's built-in `economist.recipe` by Kovid
 Goyal and unkn0wn. The session and CDP layers were developed with the assistance of
-[Claude Code](https://claude.com/claude-code), Anthropic's agentic coding CLI.
+[Claude Code](https://claude.com/claude-code).
 
 GPLv3, like calibre's recipes. See `LICENSE`.

@@ -24,7 +24,7 @@ resolve.
 Driving calibre's own engine meant Chromium **134** wearing a ``Chrome/151``
 User-Agent, with ``--disable-gpu`` removing WebGL entirely. DataDome reads both
 and reclassified the device, serving an interstitial challenge to every request.
-That engine also SIGSEGVs on some machines (Asahi Linux, aarch64).
+That engine also SIGSEGVs on some machines (Fedora, aarch64).
 
 Navigation therefore happens in ``economist_chrome.py``, which drives the real
 ungoogled-chromium 151 the User-Agent was always claiming to be. This module
