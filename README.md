@@ -1,6 +1,6 @@
 # The Economist for calibre, through your own Chromium
 
-Last updated: 2026-09-09 10:01 AM CDT
+Last updated: 2026-09-19 03:13 AM CDT
 
 [![ci](https://github.com/CR0CKER/calibre-economist-cdp/actions/workflows/ci.yml/badge.svg)](https://github.com/CR0CKER/calibre-economist-cdp/actions/workflows/ci.yml)
 [![license](https://img.shields.io/github/license/CR0CKER/calibre-economist-cdp)](LICENSE)
@@ -92,6 +92,15 @@ every run: recipe ──▶ economist_session.py --serve ──▶ your Chromium
    inside the live page. Same TLS, same fingerprint, same cookie jar, same origin.
    calibre's QtWebEngine is not involved anywhere. Index parsing (`__NEXT_DATA__`)
    is the same as the built-in recipe.
+4. **A DataDome interstitial on a fetch is ridden out, not fatal.** DataDome
+   sometimes answers an in-page `fetch()` with `403` and a body carrying
+   `'rt':'i'`. The page's own DataDome tag solves that within seconds, but it is
+   configured with `replayAfterChallenge: false`, so it never retries *our*
+   request. `CDPBrowser` therefore backs off and retries (2, 4, 8, 15 s), then
+   navigates the tab to `/weeklyedition` once and retries a last time: at most
+   six fetches in about a minute. A captcha (`'rt':'c'`) needs a human, so it
+   fails at once with a re-login hint. Detect challenges by the body's `rt`, not
+   by headers: `x-datadome: protected` is present on healthy `200`s too.
 
 The fingerprint is honest because it *is* a real browser, and the User-Agent is
 taken from `Browser.getVersion`, so it can never drift from the engine again.
@@ -231,7 +240,8 @@ Every one of these caused a silent failure during development.
 | Symptom | Cause and fix |
 |---|---|
 | `--refresh` says **BLOCKED, rt=i** | Interstitial did not clear in 60 s. Retry once; if it persists, redo Setup. Inspect `last-challenge.html` in the profile. |
-| `--refresh` says **BLOCKED, rt=c** | Hard block. Log in again in the browser, then `--seed`. |
+| `--refresh` says **BLOCKED, rt=c**, or the download fails with `HTTP Error 403: … DataDome captcha` | Hard block. Log in again in the browser (solve the captcha if shown), then `--seed`. **Do not retry in a loop**: rapid repeated sessions are what escalates DataDome from an interstitial to a captcha. Wait, then make one attempt. |
+| Log shows `DataDome interstitial on … - retry N` | Normal: the recipe is waiting for DataDome to clear a challenge it solves by itself. Only a bare `HTTP Error 403` at the end means it did not clear within about a minute. |
 | `Portal call failed: … ServiceUnknown` | Flatpak calibre lacks the host-spawn grant; see Setup. |
 | `Failed to change to directory "/tmp/calibre-…"` | `flatpak-spawn` called without `--directory=`. Should not happen with this recipe; report it. |
 | `ERROR: chromium exited early` | Another Chromium is already using that profile directory, or the browser command is wrong (`ECONOMIST_BROWSER_CMD`). |
@@ -248,6 +258,10 @@ Every one of these caused a silent failure during development.
   bound to the TLS fingerprint; only a real browser's handshake is accepted. If
   the served session is missing the download fails immediately and says so,
   rather than silently producing an edition of error pages.
+- **Request rate matters to DataDome.** It scores patterns, not just
+  fingerprints. One download at a time, with hours between attempts, is fine;
+  bursts of fresh sessions hammering the index are not, and can earn the IP a
+  temporary captcha block.
 - **Fetches are serialised.** One websocket means one CDP call at a time. Each fetch
   is a few tenths of a second, so a full edition takes a few minutes.
 - **The session is IP- and User-Agent-bound.** Seed on the machine that will

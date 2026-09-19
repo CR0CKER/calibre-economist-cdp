@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Fixed
+- A DataDome interstitial (`403`, body `'rt':'i'`) on an in-page `fetch()` no longer kills the download. The page's DataDome tag solves it by itself but does not replay our request (`replayAfterChallenge: false`), so the first 403 on the index fetch was fatal. `CDPBrowser` now backs off and retries (2, 4, 8, 15 s), then re-navigates the tab to the index once and retries a last time; at most six fetches in about a minute. Seen 2026-09-11 and 2026-09-19.
+- A DataDome captcha (`'rt':'c'`) now fails immediately with a "log in again, then `--seed`" message instead of a bare `HTTP Error 403`.
+
 ### Changed
 - README states plainly that Linux is the only supported platform and adds a *Porting to macOS and Windows* section naming the exact blockers found by an audit, so the work is pickup-able by someone who can test on those platforms.
 

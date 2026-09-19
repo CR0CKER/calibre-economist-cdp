@@ -30,6 +30,8 @@ class FakeCDP:
 
     def call(self, method, params, timeout=None):
         self.calls.append((method, params, timeout))
+        if method != 'Runtime.evaluate':
+            return {}                       # e.g. Page.navigate: no page result
         if not self.results:
             return {'result': {'value': None}}
         return {'result': {'value': json.dumps(self.results.pop(0))}}
@@ -104,6 +106,95 @@ def test_empty_reply_raises_rather_than_returning_nothing(recipe, monkeypatch):
     br, _ = make_browser(recipe, monkeypatch)      # FakeCDP returns value None
     with pytest.raises(urllib.error.URLError):
         br.open_novisit('https://www.economist.com/x')
+
+
+# --------------------------------------------------------------------------
+# DataDome interstitial recovery (2026-09-11, reproduced 2026-09-19)
+#
+# DataDome sometimes answers the tab's fetch() with a 403 interstitial
+# (body 'rt':'i'). The page's own DataDome tag solves it within seconds, but
+# with replayAfterChallenge:false it never retries *our* request, so the first
+# 403 used to be fatal - and the index fetch is the first one.
+# --------------------------------------------------------------------------
+
+INTERSTITIAL = (b"<html><script>var dd={'rt':'i','cid':'x','hsh':'y',"
+                b"'host':'geo.captcha-delivery.com'}</script></html>")
+CAPTCHA = (b"<html><script>var dd={'rt':'c','cid':'x',"
+           b"'host':'geo.captcha-delivery.com'}</script></html>")
+
+
+@pytest.fixture
+def sleeps(recipe, monkeypatch):
+    slept = []
+    monkeypatch.setattr(recipe.time, 'sleep', slept.append)
+    return slept
+
+
+def evaluates(fake):
+    return [c for c in fake.calls if c[0] == 'Runtime.evaluate']
+
+
+def navigations(fake):
+    return [c for c in fake.calls if c[0] == 'Page.navigate']
+
+
+def test_interstitial_403_is_retried_until_the_session_heals(recipe, monkeypatch, sleeps):
+    br, fake = make_browser(recipe, monkeypatch, [
+        page_result(INTERSTITIAL, status=403),
+        page_result(b'<html>__NEXT_DATA__</html>'),
+    ])
+    resp = br.open_novisit('https://www.economist.com/weeklyedition')
+    assert resp.read() == b'<html>__NEXT_DATA__</html>'
+    assert len(evaluates(fake)) == 2
+    assert sleeps and not navigations(fake)
+
+
+def test_persistent_interstitial_escalates_to_one_navigation(recipe, monkeypatch, sleeps):
+    n = len(recipe.CHALLENGE_BACKOFF_S) + 1
+    br, fake = make_browser(recipe, monkeypatch,
+                            [page_result(INTERSTITIAL, status=403)] * n
+                            + [page_result(b'healed')])
+    assert br.open_novisit('https://www.economist.com/x').read() == b'healed'
+    assert len(navigations(fake)) == 1
+    assert navigations(fake)[0][1] == {'url': recipe.INDEX_URL}
+
+
+def test_interstitial_that_never_clears_raises_403_after_the_cap(recipe, monkeypatch, sleeps):
+    br, fake = make_browser(recipe, monkeypatch,
+                            [page_result(INTERSTITIAL, status=403)] * 50)
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        br.open_novisit('https://www.economist.com/x')
+    assert excinfo.value.code == 403
+    # Brakes: bounded attempts, one navigation, bounded total wait.
+    assert len(evaluates(fake)) == len(recipe.CHALLENGE_BACKOFF_S) + 2
+    assert len(navigations(fake)) == 1
+    assert sum(sleeps) <= 90
+
+
+def test_captcha_fails_fast_with_a_relogin_hint(recipe, monkeypatch, sleeps):
+    br, fake = make_browser(recipe, monkeypatch,
+                            [page_result(CAPTCHA, status=403), page_result(b'never')])
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        br.open_novisit('https://www.economist.com/x')
+    assert '--seed' in str(excinfo.value.msg)
+    assert len(evaluates(fake)) == 1 and not sleeps and not navigations(fake)
+
+
+def test_plain_403_without_a_challenge_is_not_retried(recipe, monkeypatch, sleeps):
+    br, fake = make_browser(recipe, monkeypatch,
+                            [page_result(b'forbidden', status=403), page_result(b'x')])
+    with pytest.raises(urllib.error.HTTPError):
+        br.open_novisit('https://www.economist.com/x')
+    assert len(evaluates(fake)) == 1 and not sleeps
+
+
+def test_fetch_torn_down_by_a_reload_is_retried(recipe, monkeypatch, sleeps):
+    br, fake = make_browser(recipe, monkeypatch, [
+        page_result(INTERSTITIAL, status=403),
+        {'ok': False, 'error': 'TypeError: Failed to fetch'},   # aborted mid-reload
+        page_result(b'ok'),
+    ])
+    assert br.open_novisit('https://www.economist.com/x').read() == b'ok'
 
 
 @pytest.mark.parametrize('url,same', [
