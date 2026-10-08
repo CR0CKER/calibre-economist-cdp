@@ -561,7 +561,7 @@ def test_pid_is_our_browser_uses_ps_on_macos(monkeypatch, tmp_path):
     monkeypatch.setattr(mod.subprocess, 'run',
                         lambda *args, **kwargs: calls.append((args, kwargs)) or Result())
     assert mod.pid_is_our_browser(111) is True
-    assert calls[0][0][0] == ['ps', '-p', '111', '-o', 'command=']
+    assert calls[0][0][0] == ['/bin/ps', '-p', '111', '-o', 'command=']
 
 
 # --- L2: the recipe's session pointer must not be group/world writable ------

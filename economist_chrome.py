@@ -432,7 +432,7 @@ def pid_is_our_browser(pid: int) -> bool:
         # identity check used on Linux.
         try:
             result = subprocess.run(
-                ['ps', '-p', str(pid), '-o', 'command='],
+                ['/bin/ps', '-p', str(pid), '-o', 'command='],
                 capture_output=True, text=True, timeout=3, check=False)
         except (OSError, subprocess.SubprocessError):
             return False
