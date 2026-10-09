@@ -49,6 +49,8 @@ def _calibre_config_dir():
     flatpak = os.path.expanduser('~/.var/app/com.calibre_ebook.calibre/config/calibre')
     if os.path.isdir(flatpak):
         return flatpak
+    if sys.platform == 'darwin':
+        return os.path.expanduser('~/Library/Preferences/calibre')
     return os.path.expanduser('~/.config/calibre')
 
 

@@ -49,6 +49,7 @@ import subprocess  # nosec B404 - argv lists only, never a shell
 import sys
 import time
 import logging
+import shlex
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -68,9 +69,32 @@ FLATPAK_APP = 'io.github.ungoogled_software.ungoogled_chromium'
 #   ECONOMIST_BROWSER_CMD="google-chrome"   or   "chromium-browser"
 #   ECONOMIST_BROWSER_CMD="flatpak run --command=chromium org.chromium.Chromium"
 # The default drives the ungoogled-chromium flatpak.
-BROWSER_CMD = os.environ.get(
-    'ECONOMIST_BROWSER_CMD',
-    f'flatpak run --command=chromium {FLATPAK_APP}').split()
+def parse_browser_command(value: str) -> list[str]:
+    """Parse the browser command without breaking executable paths with spaces."""
+    return shlex.split(value)
+
+
+def default_browser_command() -> list[str]:
+    """Return a usable browser command for the current host when possible."""
+    if sys.platform == 'darwin':
+        mac_app_browsers = (
+            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+            '/Applications/Chromium.app/Contents/MacOS/Chromium',
+        )
+        for executable in mac_app_browsers:
+            if os.access(executable, os.X_OK):
+                return [executable]
+        for executable in ('google-chrome', 'chromium', 'chromium-browser'):
+            resolved = shutil.which(executable)
+            if resolved:
+                return [resolved]
+        # Preserve a useful error from run() if no browser is installed.
+        return ['google-chrome']
+    return shlex.split(f'flatpak run --command=chromium {FLATPAK_APP}')
+
+
+BROWSER_CMD = parse_browser_command(os.environ['ECONOMIST_BROWSER_CMD']) \
+    if os.environ.get('ECONOMIST_BROWSER_CMD') else default_browser_command()
 # The dedicated profile. Must NOT be the profile you browse with: a second
 # Chromium on a profile that is already open exits immediately. Override with
 # ECONOMIST_CHROME_PROFILE. The default sits inside the flatpak's own tree so
@@ -402,11 +426,22 @@ def pid_is_our_browser(pid: int) -> bool:
     Pids are recycled. After a reboot or a crash the recorded pid may belong to
     something else entirely, and signalling it would be someone else's outage.
     """
+    if sys.platform == 'darwin':
+        # macOS has no /proc. `ps` exposes the executable and its arguments
+        # without involving a shell, which lets us apply the same profile-path
+        # identity check used on Linux.
+        try:
+            result = subprocess.run(
+                ['/bin/ps', '-p', str(pid), '-o', 'command='],
+                capture_output=True, text=True, timeout=3, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return result.returncode == 0 and CHROME_PROFILE in result.stdout
     try:
         with open(f'/proc/{pid}/cmdline', 'rb') as f:
             cmdline = f.read().decode('utf-8', 'replace')
     except OSError:
-        return False           # no such process, or not Linux: do not signal
+        return False           # no such process, or unsupported process table
     return CHROME_PROFILE in cmdline
 
 

@@ -56,19 +56,22 @@ import sys
 import time
 
 FLATPAK_CONFIG_DIR = os.path.expanduser('~/.var/app/com.calibre_ebook.calibre/config/calibre')
+MACOS_CONFIG_DIR = os.path.expanduser('~/Library/Preferences/calibre')
 
 
 def calibre_config_dir() -> str:
     """calibre's config directory, wherever this calibre keeps it.
 
     Order: the CALIBRE_CONFIG_DIRECTORY override calibre itself honours, then
-    the flatpak location if it exists, then the conventional ~/.config/calibre.
+    the flatpak location if it exists, then macOS's or Linux's native default.
     """
     env = os.environ.get('CALIBRE_CONFIG_DIRECTORY')
     if env:
         return os.path.expanduser(env)
     if os.path.isdir(FLATPAK_CONFIG_DIR):
         return FLATPAK_CONFIG_DIR
+    if sys.platform == 'darwin':
+        return MACOS_CONFIG_DIR
     return os.path.expanduser('~/.config/calibre')
 
 
