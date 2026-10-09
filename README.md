@@ -42,8 +42,9 @@ download have been verified on this platform.
 For the manual macOS setup, save the copied cURL request and import it with:
 
 ```bash
-pbpaste > /tmp/eco-curl.txt
-python3 import_curl_cookies.py /tmp/eco-curl.txt
+pbpaste > "$TMPDIR/eco-curl.txt"
+python3 import_curl_cookies.py "$TMPDIR/eco-curl.txt"
+rm "$TMPDIR/eco-curl.txt"
 python3 economist_session.py --seed
 ```
 
@@ -186,11 +187,12 @@ One time: harvest a browser export, import it, seed the profile.
    python3 economist_session.py --seed
    ```
 
-   On macOS, use `/tmp` for the temporary export:
+   On macOS, use the per-user `$TMPDIR` for the temporary export:
 
    ```bash
-   pbpaste > /tmp/eco-curl.txt
-   python3 import_curl_cookies.py /tmp/eco-curl.txt
+   pbpaste > "$TMPDIR/eco-curl.txt"
+   python3 import_curl_cookies.py "$TMPDIR/eco-curl.txt"
+   rm "$TMPDIR/eco-curl.txt"
    python3 economist_session.py --seed
    ```
 
