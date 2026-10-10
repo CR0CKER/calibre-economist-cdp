@@ -4,12 +4,17 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 
 ## [Unreleased]
 
+### Added
+- macOS support, contributed by @jordanhong (#9) and verified end to end on macOS 15.7.9 (Apple Silicon), calibre 9.14.0 and Google Chrome 153. calibre's config dir resolves to `~/Library/Preferences/calibre`; the default browser is an installed Google Chrome or Chromium; `--stop`'s pid fallback checks the process through `/bin/ps` because macOS has no `/proc`.
+
 ### Fixed
 - A DataDome interstitial (`403`, body `'rt':'i'`) on an in-page `fetch()` no longer kills the download. The page's DataDome tag solves it by itself but does not replay our request (`replayAfterChallenge: false`), so the first 403 on the index fetch was fatal. `CDPBrowser` now backs off and retries (2, 4, 8, 15 s), then re-navigates the tab to the index once and retries a last time; at most six fetches in about a minute. Seen 2026-09-11 and 2026-09-19.
 - A DataDome captcha (`'rt':'c'`) now fails immediately with a "log in again, then `--seed`" message instead of a bare `HTTP Error 403`.
 
 ### Changed
 - README states plainly that Linux is the only supported platform and adds a *Porting to macOS and Windows* section naming the exact blockers found by an audit, so the work is pickup-able by someone who can test on those platforms.
+- `ECONOMIST_BROWSER_CMD` is parsed with `shlex.split()` instead of being split on whitespace, so a quoted executable path with spaces works (#9). An empty value now falls back to the default browser instead of crashing.
+- README: Requirements now lists Linux or macOS; the porting section becomes a *macOS* section (what differs, where it was verified) and a *Porting to Windows* section.
 
 ## [1.1.0] - 2026-09-09
 

@@ -1,6 +1,6 @@
 # The Economist for calibre, through your own Chromium
 
-Last updated: 2026-09-19 03:13 AM CDT
+Last updated: 2026-10-10 04:02 PM CDT
 
 [![ci](https://github.com/CR0CKER/calibre-economist-cdp/actions/workflows/ci.yml/badge.svg)](https://github.com/CR0CKER/calibre-economist-cdp/actions/workflows/ci.yml)
 [![license](https://img.shields.io/github/license/CR0CKER/calibre-economist-cdp)](LICENSE)
@@ -19,35 +19,6 @@ full articles with images, 0 failures, 0 HTTP 403s. Discussion: MobileRead threa
 You need an Economist **subscription**. This project shares code only; no
 downloaded editions are or will be distributed.
 
-## macOS support status
-
-When the system is detected as macOS (`sys.platform == 'darwin'`), the
-following macOS-specific behaviors take effect automatically:
-
-- Calibre’s native config directory is detected at
-  `~/Library/Preferences/calibre`.
-- Native Google Chrome and Chromium application bundles are detected
-  automatically.
-- Browser commands are parsed safely when executable paths contain spaces.
-  Paths supplied through `ECONOMIST_BROWSER_CMD` must be quoted.
-- The browser PID fallback uses macOS `ps` instead of Linux’s `/proc`.
-
-When the system is not macOS, the existing Linux behavior remains unchanged.
-
-**Testing platform:** macOS 15.7.9 on Apple Silicon (`arm64`), Calibre 9.14.0
-(`darwin`, embedded Python), Google Chrome 153.0.8010.48, and Python 3.13.5.
-Full end-to-end edition
-download have been verified on this platform.
-
-For the manual macOS setup, save the copied cURL request and import it with:
-
-```bash
-pbpaste > "$TMPDIR/eco-curl.txt"
-python3 import_curl_cookies.py "$TMPDIR/eco-curl.txt"
-rm "$TMPDIR/eco-curl.txt"
-python3 economist_session.py --seed
-```
-
 ## Contents
 
 - [Why the built-in recipe is dead](#why-the-built-in-recipe-is-dead)
@@ -60,7 +31,8 @@ python3 economist_session.py --seed
 - [Troubleshooting](#troubleshooting)
 - [Known limitations](#known-limitations)
 - [Files](#files)
-- [Porting to macOS and Windows](#porting-to-macos-and-windows)
+- [macOS](#macos)
+- [Porting to Windows](#porting-to-windows)
 - [Platform notes: flatpak and Fedora Linux](#platform-notes-flatpak-and-fedora-linux)
 - [Attribution and license](#attribution-and-license)
 
@@ -142,14 +114,16 @@ taken from `Browser.getVersion`, so it can never drift from the engine again.
 
 - An Economist subscription.
 - calibre 8 or 9 (tested on 9.7, flatpak).
-- A Chrome or Chromium. Default is the `io.github.ungoogled_software.ungoogled_chromium`
-  flatpak; any other is a one-line environment override (see Setup).
+- A Chrome or Chromium. Default on Linux is the
+  `io.github.ungoogled_software.ungoogled_chromium` flatpak, on macOS an installed
+  Google Chrome or Chromium; any other is a one-line environment override (see Setup).
 - Python 3.10+ on the host for the helper scripts. **No third-party packages**:
   the CDP client and its WebSocket implementation are stdlib only.
-- **Linux.** That is the only platform this has ever run on, and the code does
-  not currently run on macOS or Windows. See
-  [Porting to macOS and Windows](#porting-to-macos-and-windows) for exactly what
-  stands in the way - it is not much, and help is welcome.
+- **Linux or macOS.** Linux is where this was built and is tested. macOS
+  support was contributed in
+  [#9](https://github.com/CR0CKER/calibre-economist-cdp/pull/9) and verified end
+  to end by its author; see [macOS](#macos). Windows does not run yet:
+  [Porting to Windows](#porting-to-windows) lists exactly what stands in the way.
 
 ## Setup
 
@@ -171,7 +145,7 @@ One time: harvest a browser export, import it, seed the profile.
    wl-paste | grep -c __cf_bm      # xclip -o on X11
    ```
 
-   On macOS, use the clipboard command:
+   On macOS:
 
    ```bash
    pbpaste | grep -c __cf_bm
@@ -206,7 +180,7 @@ that runs calibre (for a flatpak calibre: `flatpak override --user --env=... com
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `ECONOMIST_BROWSER_CMD` | command that starts Chromium, e.g. `google-chrome` or `flatpak run --command=chromium org.chromium.Chromium` | ungoogled-chromium flatpak |
+| `ECONOMIST_BROWSER_CMD` | command that starts Chromium, e.g. `google-chrome` or `flatpak run --command=chromium org.chromium.Chromium` | Linux: ungoogled-chromium flatpak; macOS: installed Chrome or Chromium |
 | `ECONOMIST_CHROME_PROFILE` | the dedicated profile directory (never your everyday profile) | inside the flatpak's config tree |
 | `ECONOMIST_SESSION_SCRIPT` | path to `economist_session.py`, if the recorded location is wrong | the recorded location |
 | `ECONOMIST_DEBUG` | set to `1` to print the best-effort paths (retries, skipped teardown steps) to stderr | unset, silent |
@@ -328,7 +302,7 @@ Every one of these caused a silent failure during development.
 | `economist_chrome.py` | The navigator and fetch session: drives Chromium over CDP; `--serve` leaves it running. Contains a minimal RFC 6455 WebSocket client so there is nothing to install. |
 | `import_curl_cookies.py` | One-time import from a DevTools "Copy as cURL". |
 | `check_economist_access.py` | Standalone diagnostic: does the served session reach the site? Run it after `--serve`. |
-| `test_*.py`, `conftest.py` | Unit tests (105). `conftest.py` loads the recipe with calibre's imports stubbed so it can be tested. Run via `scripts/gates.sh` |
+| `test_*.py`, `conftest.py` | Unit tests (116). `conftest.py` loads the recipe with calibre's imports stubbed so it can be tested. Run via `scripts/gates.sh` |
 | `scripts/gates.sh` | The merge gates: `ruff`, `bandit`, `pytest`. CI runs exactly this script |
 | `requirements-dev.txt` | Hash-locked dev tools (pytest, ruff, bandit). Not needed at run time |
 
@@ -341,7 +315,33 @@ Runtime state, all outside the repository:
 | `<calibre config>/economist-cdp-endpoint.json` | The live DevTools endpoint while a download runs. |
 | `<profile dir>/` | The dedicated Chromium profile, `0700`. |
 
-## Porting to macOS and Windows
+## macOS
+
+Contributed by [@jordanhong](https://github.com/jordanhong) in
+[#9](https://github.com/CR0CKER/calibre-economist-cdp/pull/9). I have no Mac, so
+this rests on the contributor's test and on the unit tests, which run on Linux.
+
+**Verified on:** macOS 15.7.9 on Apple Silicon (`arm64`), calibre 9.14.0, Google
+Chrome 153.0.8010.48, Python 3.13.5: a full end-to-end edition download.
+
+What differs from Linux, all selected automatically by `sys.platform == 'darwin'`:
+
+| Where | On macOS |
+|---|---|
+| calibre's config dir | `~/Library/Preferences/calibre`, calibre's native location. `CALIBRE_CONFIG_DIRECTORY` still wins |
+| `economist_chrome.py`, default browser | The first of `/Applications/Google Chrome.app`, `/Applications/Chromium.app`, then `google-chrome`, `chromium` or `chromium-browser` on `PATH`. `ECONOMIST_BROWSER_CMD` still wins |
+| `economist_chrome.py`, `ECONOMIST_BROWSER_CMD` | Parsed with `shlex.split()` on every platform, so quote a path with spaces: `ECONOMIST_BROWSER_CMD='"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"'` |
+| `economist_chrome.py`, `pid_is_our_browser` | macOS has no `/proc`, so `/bin/ps -p <pid> -o command=` supplies the command line for the same profile-path check before the crash-only pid fallback. The normal shutdown still goes over CDP |
+| Setup | `pbpaste` instead of `wl-paste`, and the cURL copy goes to the per-user `$TMPDIR` (see [Setup](#setup) step 6) |
+
+The default profile directory is still the flatpak-shaped
+`~/.var/app/io.github.ungoogled_software.ungoogled_chromium/config/chromium-economist`.
+It works on macOS, the browser just creates it; set `ECONOMIST_CHROME_PROFILE`
+if you would rather keep it somewhere else.
+
+<sub>[↑ Back to contents](#contents)</sub>
+
+## Porting to Windows
 
 Not started, and I have no machine to test on. This is what an audit of the code
 found, so anyone picking it up starts from facts rather than from a survey. Pull
@@ -351,9 +351,9 @@ Everything in the DevTools layer is portable standard-library Python: the
 websocket client, the port allocation, the fetch path, the parser, the cookie
 handling. What breaks is the POSIX assumptions around it.
 
-**Windows: two blockers, both from the same cause.** Windows has no POSIX
-permission bits. `os.chmod` only toggles the read-only flag, and any writable
-file reads back as mode `0666`.
+**Two blockers, both from the same cause.** Windows has no POSIX permission bits.
+`os.chmod` only toggles the read-only flag, and any writable file reads back as
+mode `0666`.
 
 | Where | What happens |
 |---|---|
@@ -366,23 +366,11 @@ interpreter rather than hard-coding it. Note what is lost: on Windows the
 credential files are not permission-protected at all, so the protection is the
 user profile's ACL and that should be said out loud in the docs.
 
-**macOS: one real bug, one degradation.**
-
-| Where | What happens |
-|---|---|
-| `economist_chrome.py`, `BROWSER_CMD` | An executable path containing spaces must be quoted in `ECONOMIST_BROWSER_CMD`; the code parses it with `shlex.split()` |
-| `economist_chrome.py`, `pid_is_our_browser` | macOS has no `/proc`; the code uses `ps` to verify the recorded profile path before using the pid fallback. The normal shutdown still goes over CDP |
-
-On macOS, the browser command automatically checks installed Chrome and
-Chromium application bundles. Set `ECONOMIST_BROWSER_CMD` if you want a
-different executable. On Linux, the default remains the ungoogled-Chromium
-Flatpak command.
-
 **The harder half is not the code.** Running is not working. This approach
-depends on the browser fingerprint being genuinely the user's own, and it has
-only ever been observed to clear DataDome on one machine, one profile, one IP.
-A port needs someone who can actually run a download and see articles, not just
-a green test suite.
+depends on the browser fingerprint being genuinely the user's own; it has been
+observed to clear DataDome on a Linux machine and on the macOS one above, each
+with its owner's own browser and IP. A port needs someone who can actually run a
+download and see articles, not just a green test suite.
 
 <sub>[↑ Back to contents](#contents)</sub>
 
