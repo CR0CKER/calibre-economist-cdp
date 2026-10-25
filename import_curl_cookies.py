@@ -120,7 +120,7 @@ def parse_curl(text: str) -> Harvest:
     # A Windows paste arrives with CRLF line endings, and a file saved by
     # Windows PowerShell 5.1 with a BOM. Normalise both here, where every input
     # passes, rather than at each reader.
-    text = text.lstrip('﻿').replace('\r\n', '\n').strip()
+    text = text.lstrip('\ufeff').replace('\r\n', '\n').strip()
     if not text.startswith('curl'):
         fail('that does not look like a "Copy as cURL" command (it must start with "curl")')
     if '^"' in text:

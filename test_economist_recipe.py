@@ -363,6 +363,18 @@ def test_python_falls_back_to_path_on_windows(recipe, monkeypatch, tmp_path):
     assert recipe._python() == 'C:\\Windows\\py.exe'
 
 
+def test_py_launcher_is_preferred_over_python_on_windows(recipe, monkeypatch, tmp_path):
+    """A fresh Windows has a python.exe on PATH that only opens the Microsoft
+    Store; the py launcher is a real interpreter wherever it exists."""
+    monkeypatch.delenv('ECONOMIST_PYTHON', raising=False)
+    monkeypatch.setattr(recipe.sys, 'platform', 'win32')
+    monkeypatch.setattr(recipe, 'SESSION_SCRIPT', str(tmp_path / 'economist_session.py'))
+    found = {'py': 'C:\\Windows\\py.exe',
+             'python': 'C:\\Users\\u\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe'}
+    monkeypatch.setattr(recipe.shutil, 'which', found.get)
+    assert recipe._python() == 'C:\\Windows\\py.exe'
+
+
 def test_spawn_runs_the_helper_with_the_resolved_python(recipe, monkeypatch):
     monkeypatch.setattr(recipe.os.path, 'exists', lambda p: False)   # not in a flatpak
     monkeypatch.setattr(recipe, '_python', lambda: 'PY')

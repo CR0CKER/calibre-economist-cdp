@@ -108,6 +108,16 @@ def test_import_from_file_offers_to_shred_it(config, monkeypatch):
     assert not src.exists()
 
 
+def test_a_bad_file_is_offered_for_shredding_too(config, monkeypatch):
+    """The importer shreds its input on a parse failure; the setup tool left
+    the file, login and all, behind."""
+    src = config / 'eco-curl.txt'
+    src.write_text("curl ^\"https://x^\" -b ^\"__cf_bm=z^\"")
+    answers(monkeypatch, 'y')
+    assert mod.import_session(str(src)) is False
+    assert not src.exists()
+
+
 # --- the whole run -----------------------------------------------------------
 
 def test_main_runs_all_four_steps(config, monkeypatch):

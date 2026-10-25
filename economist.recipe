@@ -244,8 +244,9 @@ def _python():
 
     Not sys.executable: inside calibre that is calibre's own worker binary. On
     Windows there is no python3 either, so prefer a virtual environment next to
-    the helper (``uv venv`` in the checkout), then whatever Python is on PATH.
-    ECONOMIST_PYTHON overrides all of this.
+    the helper (``uv venv`` in the checkout), then the py launcher, then python
+    on PATH. py comes first because a fresh Windows puts a python.exe on PATH
+    that only opens the Microsoft Store. ECONOMIST_PYTHON overrides all of this.
     """
     env = os.environ.get('ECONOMIST_PYTHON')
     if env:
@@ -255,7 +256,7 @@ def _python():
     venv = os.path.join(os.path.dirname(SESSION_SCRIPT), '.venv', 'Scripts', 'python.exe')
     if os.path.isfile(venv):
         return venv
-    return shutil.which('python') or shutil.which('py') or 'python'
+    return shutil.which('py') or shutil.which('python') or 'python'
 
 
 def _no_console():

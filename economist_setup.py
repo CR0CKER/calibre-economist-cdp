@@ -139,7 +139,7 @@ def check_environment() -> bool:
               '(has calibre been started once?)')
 
     if sys.platform == 'win32' and not os.path.isfile(VENV_PYTHON):
-        print('  note   no .venv here. calibre will run the helper with python/py '
+        print('  note   no .venv here. calibre will run the helper with py/python '
               'from PATH; run "uv venv" in this folder to pin it')
 
     if sys.platform.startswith('linux') and os.path.isdir(economist_session.FLATPAK_CONFIG_DIR):
@@ -185,13 +185,22 @@ def import_session(from_file: str | None) -> bool:
             harvest = import_curl_cookies.parse_curl(text)
             break
         except SystemExit:
-            if from_file or not ask('  Try copying again?'):
+            if from_file:
+                offer_shred(from_file)
+                return False
+            if not ask('  Try copying again?'):
                 return False
 
     import_curl_cookies.save_and_report(harvest, economist_session.COOKIE_FILE)
-    if from_file and ask(f'  Delete {from_file}? It holds your login.'):
-        import_curl_cookies.shred(from_file)
+    if from_file:
+        offer_shred(from_file)
     return True
+
+
+def offer_shred(path: str) -> None:
+    """Offer to shred an export file, whether or not it parsed: it may hold a login."""
+    if ask(f'  Delete {path}? It may hold your login.'):
+        import_curl_cookies.shred(path)
 
 
 def seed() -> bool:

@@ -1,6 +1,6 @@
 # The Economist for calibre, through your own Chromium
 
-Last updated: 2026-10-10 04:02 PM CDT
+Last updated: 2026-10-25 04:15 AM CDT
 
 [![ci](https://github.com/CR0CKER/calibre-economist-cdp/actions/workflows/ci.yml/badge.svg)](https://github.com/CR0CKER/calibre-economist-cdp/actions/workflows/ci.yml)
 [![license](https://img.shields.io/github/license/CR0CKER/calibre-economist-cdp)](LICENSE)
@@ -115,15 +115,16 @@ taken from `Browser.getVersion`, so it can never drift from the engine again.
 - An Economist subscription.
 - calibre 8 or 9 (tested on 9.7, flatpak).
 - A Chrome or Chromium. Default on Linux is the
-  `io.github.ungoogled_software.ungoogled_chromium` flatpak, on macOS an installed
-  Google Chrome or Chromium; any other is a one-line environment override (see Setup).
+  `io.github.ungoogled_software.ungoogled_chromium` flatpak, on macOS and Windows an
+  installed Google Chrome or Chromium; any other is a one-line environment override (see Setup).
 - Python 3.10+ on the host for the helper scripts. **No third-party packages**:
   the CDP client and its WebSocket implementation are stdlib only.
 - **Linux, macOS or Windows.** Linux is where this was built and is tested. macOS
   support was contributed in
   [#9](https://github.com/CR0CKER/calibre-economist-cdp/pull/9) and verified end
-  to end by its author; see [macOS](#macos). Windows support is verified end
-  to end; see [Windows](#windows).
+  to end by its author; see [macOS](#macos). Windows support was contributed in
+  [#15](https://github.com/CR0CKER/calibre-economist-cdp/pull/15) and verified end
+  to end by its author; see [Windows](#windows).
 
 ## Setup
 
@@ -144,6 +145,11 @@ python3 economist_setup.py                    # Linux, macOS
 
 On Linux the clipboard needs `wl-clipboard` or `xclip`; without either, save
 the copy to a file and pass `--from-file <file>`.
+
+The clipboard still holds your login until the tool replaces it with the
+recipe. A clipboard history keeps it after that: on Windows clear it in Win+V
+(and turn off clipboard sync across devices, which uploads it), on Linux in
+your clipboard manager, if you run one.
 
 The manual steps:
 
@@ -220,7 +226,7 @@ that runs calibre (for a flatpak calibre: `flatpak override --user --env=... com
 | `ECONOMIST_BROWSER_CMD` | command that starts Chromium, e.g. `google-chrome` or `flatpak run --command=chromium org.chromium.Chromium` | Linux: ungoogled-chromium flatpak; macOS and Windows: installed Chrome or Chromium |
 | `ECONOMIST_CHROME_PROFILE` | the dedicated profile directory (never your everyday profile) | inside the flatpak's config tree; Windows: `%LOCALAPPDATA%\calibre-economist-cdp\chrome-profile` |
 | `ECONOMIST_SESSION_SCRIPT` | path to `economist_session.py`, if the recorded location is wrong | the recorded location |
-| `ECONOMIST_PYTHON` | the Python the recipe runs the helper with | `python3`; Windows: `.venv\Scripts\python.exe` beside the helper, else `python` or `py` on `PATH` |
+| `ECONOMIST_PYTHON` | the Python the recipe runs the helper with | `python3`; Windows: `.venv\Scripts\python.exe` beside the helper, else `py` or `python` on `PATH` |
 | `ECONOMIST_DEBUG` | set to `1` to print the best-effort paths (retries, skipped teardown steps) to stderr | unset, silent |
 | `ECONOMIST_SERVE_MAX_S` | seconds after which a served browser is shut down regardless, so a crashed download cannot leave the DevTools port open | 2700 (45 min) |
 | `CALIBRE_CONFIG_DIRECTORY` | calibre's config dir, if not the flatpak or platform default (`~/Library/Preferences/calibre` on macOS, `%APPDATA%\calibre` on Windows, `~/.config/calibre` on Linux) | auto |
@@ -341,7 +347,7 @@ Every one of these caused a silent failure during development.
 | `economist_chrome.py` | The navigator and fetch session: drives Chromium over CDP; `--serve` leaves it running. Contains a minimal RFC 6455 WebSocket client so there is nothing to install. |
 | `import_curl_cookies.py` | One-time import from a DevTools "Copy as cURL". |
 | `check_economist_access.py` | Standalone diagnostic: does the served session reach the site? Run it after `--serve`. |
-| `test_*.py`, `conftest.py` | Unit tests (144). `conftest.py` loads the recipe with calibre's imports stubbed so it can be tested. Run via `scripts/gates.sh` |
+| `test_*.py`, `conftest.py` | Unit tests (147). `conftest.py` loads the recipe with calibre's imports stubbed so it can be tested. Run via `scripts/gates.sh` |
 | `scripts/gates.sh` | The merge gates: `ruff`, `bandit`, `pytest`. CI runs exactly this script |
 | `requirements-dev.txt` | Hash-locked dev tools (pytest, ruff, bandit). Not needed at run time |
 
@@ -382,9 +388,10 @@ if you would rather keep it somewhere else.
 
 ## Windows
 
-**Verified on:** Windows 11 Pro, calibre 9.14, Google Chrome 155, Python 3.13
-in a uv virtual environment: a full end-to-end edition download, set up with
-`economist_setup.py`. The unit tests pass on Windows; those that assert POSIX
+**Verified by its author**
+([#15](https://github.com/CR0CKER/calibre-economist-cdp/pull/15)) on Windows 11
+Pro, calibre 9.14, Google Chrome 155, Python 3.13 in a uv virtual environment:
+a full end-to-end edition download, set up with `economist_setup.py`. The unit tests pass on Windows; those that assert POSIX
 permission bits are skipped there.
 
 What differs, all selected automatically by `sys.platform == 'win32'`:
@@ -395,9 +402,9 @@ What differs, all selected automatically by `sys.platform == 'win32'`:
 | Default browser | `chrome.exe` of Google Chrome or Chromium under Program Files, Program Files (x86) or `%LOCALAPPDATA%`, then `chrome` or `chromium` on `PATH` |
 | Default profile | `%LOCALAPPDATA%\calibre-economist-cdp\chrome-profile` |
 | `ECONOMIST_BROWSER_CMD` | Parsed in Windows mode, so backslashes survive; quote a path with spaces |
-| Python for the helper | `.venv\Scripts\python.exe` beside `economist_session.py`, then `python` or `py` on `PATH`; `ECONOMIST_PYTHON` overrides. calibre's own interpreter is not usable for this |
+| Python for the helper | `.venv\Scripts\python.exe` beside `economist_session.py`, then the `py` launcher, then `python` on `PATH` (the `py` launcher comes first because a fresh Windows has a `python.exe` that only opens the Microsoft Store); `ECONOMIST_PYTHON` overrides. calibre's own interpreter is not usable for this |
 | Console windows | The helper and its watchdog are started with `CREATE_NO_WINDOW`, so a scheduled download does not flash a console |
-| `--stop`'s pid fallback | No `/proc` or `ps`: the command line comes from `Get-CimInstance Win32_Process` through PowerShell, for the same profile-path check |
+| `--stop`'s pid fallback | No `/proc` or `ps`: the command line comes from `Get-CimInstance Win32_Process` through PowerShell, for the same profile-path check, read as UTF-8 so a user name with non-ASCII letters still matches |
 | Permission checks | **Off.** Windows has no POSIX permission bits and reports every writable file as `0666`, so the cookie-file and session-pointer checks would refuse everything. The credential files are protected only by the ACL of your user profile, where they live |
 | Setup | "Copy as cURL (**bash**)", `Get-Clipboard` instead of `wl-paste` (see [Setup](#setup) step 6). The importer accepts the BOM and CRLF a Windows paste brings, and rejects the (cmd) flavour |
 

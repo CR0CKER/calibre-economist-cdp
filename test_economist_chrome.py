@@ -634,6 +634,29 @@ def test_pid_is_our_browser_asks_cim_on_windows(monkeypatch, tmp_path):
     assert mod.pid_is_our_browser(111) is False
 
 
+def test_windows_pid_check_reads_powershell_output_as_utf8(monkeypatch, tmp_path):
+    """Windows PowerShell pipes output in the console code page (cp850 on a
+    German install) while Python decodes with the ANSI one (cp1252), so a
+    profile under C:\\Users\\Jürgen never matched. Both sides are UTF-8 now."""
+    profile = str(tmp_path / 'Jürgen' / 'chrome-profile')
+    monkeypatch.setattr(mod, 'CHROME_PROFILE', profile)
+    monkeypatch.setattr(mod.sys, 'platform', 'win32')
+    monkeypatch.setattr(mod.subprocess, 'CREATE_NO_WINDOW', 0x08000000, raising=False)
+
+    class Result:
+        returncode = 0
+        stdout = f'"chrome.exe" --user-data-dir={profile}\n'
+
+    calls = []
+    monkeypatch.setattr(mod.subprocess, 'run',
+                        lambda *args, **kwargs: calls.append((args, kwargs)) or Result())
+    assert mod.pid_is_our_browser(111) is True
+    script = calls[0][0][0][-1]
+    assert script.startswith('[Console]::OutputEncoding = [Text.Encoding]::UTF8;')
+    assert calls[0][1]['encoding'] == 'utf-8'
+    assert calls[0][1]['errors'] == 'replace'
+
+
 def test_detached_children_get_no_console_on_windows(monkeypatch):
     monkeypatch.setattr(mod.sys, 'platform', 'win32')
     monkeypatch.setattr(mod.subprocess, 'CREATE_NO_WINDOW', 0x08000000, raising=False)

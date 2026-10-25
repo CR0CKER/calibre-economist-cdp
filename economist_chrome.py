@@ -496,12 +496,15 @@ def pid_is_our_browser(pid: int) -> bool:
     if sys.platform == 'win32':
         # No /proc and no ps; wmic is gone from current Windows. CIM through
         # PowerShell reports the command line. The pid is an int, so the filter
-        # string cannot be used to inject anything.
-        query = f'(Get-CimInstance Win32_Process -Filter "ProcessId={int(pid)}").CommandLine'
+        # string cannot be used to inject anything. PowerShell pipes in the
+        # console code page and Python would decode with the ANSI one, so a
+        # non-ASCII user name never matched: force UTF-8 on both ends.
+        query = ('[Console]::OutputEncoding = [Text.Encoding]::UTF8; '
+                 f'(Get-CimInstance Win32_Process -Filter "ProcessId={int(pid)}").CommandLine')
         try:
             result = subprocess.run(  # nosec B603 - fixed absolute path, argv list
-                powershell(query), capture_output=True, text=True, timeout=30,
-                check=False, **no_window())
+                powershell(query), capture_output=True, encoding='utf-8',
+                errors='replace', timeout=30, check=False, **no_window())
         except (OSError, subprocess.SubprocessError):
             return False
         return result.returncode == 0 and CHROME_PROFILE in result.stdout
