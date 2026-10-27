@@ -6,11 +6,11 @@ Last updated: 2026-10-25 04:15 AM CDT
 [![license](https://img.shields.io/github/license/CR0CKER/calibre-economist-cdp)](LICENSE)
 [![release](https://img.shields.io/github/v/release/CR0CKER/calibre-economist-cdp)](https://github.com/CR0CKER/calibre-economist-cdp/releases)
 
-A working replacement for calibre's built-in **The Economist** news recipe, which has
-been blocked since late August 2026. It downloads a full weekly edition, with
-images, automatically and on a schedule, by letting calibre fetch through a real
-Chromium that you already have installed, driven over the Chrome DevTools
-Protocol (CDP).
+A calibre recipe that downloads the current weekly edition of **The Economist**,
+with images, on demand or on a schedule. It replaces calibre's built-in
+Economist recipe, which has been blocked since late August 2026: every request
+goes through a real Chrome or Chromium that you already have installed, driven
+over the Chrome DevTools Protocol.
 
 **Status:** working. Last verified 2026-09-09 against the edition of 2026-09-05:
 full articles with images, 0 failures, 0 HTTP 403s. Discussion: MobileRead thread
@@ -19,414 +19,176 @@ full articles with images, 0 failures, 0 HTTP 403s. Discussion: MobileRead threa
 You need an Economist **subscription**. This project shares code only; no
 downloaded editions are or will be distributed.
 
-## Contents
+## How it works
 
-- [Why the built-in recipe is dead](#why-the-built-in-recipe-is-dead)
-- [How this works](#how-this-works)
-- [Requirements](#requirements)
-- [Setup](#setup)
-- [Installing the recipe into calibre](#installing-the-recipe-into-calibre)
-- [Everyday use](#everyday-use)
-- [Design notes and traps](#design-notes-and-traps)
-- [Troubleshooting](#troubleshooting)
-- [Known limitations](#known-limitations)
-- [Files](#files)
-- [macOS](#macos)
-- [Windows](#windows)
-- [Platform notes: flatpak and Fedora Linux](#platform-notes-flatpak-and-fedora-linux)
-- [Attribution and license](#attribution-and-license)
+1. You copy your logged-in session out of your browser once. The importer saves
+   it to calibre's config folder.
+2. `--seed` loads your login cookies into a **dedicated** Chromium profile (never
+   your everyday one) and checks that the site accepts it.
+3. On each download, the recipe starts that browser off-screen, refreshes the
+   session, and fetches every article and image from inside the browser. Then
+   it shuts the browser down.
 
-## Why the built-in recipe is dead
+Your login cookies last for months, so scheduled downloads run unattended.
 
-economist.com sits behind **two** bot walls:
-
-| Request | Response |
-|---|---|
-| no cookies | `403`, `cf-mitigated: challenge`, `_cf_chl_opt` — **Cloudflare** managed challenge |
-| valid Cloudflare cookies | `403`, `x-datadome: protected`, `x-dd-b`, body `rt:'i'` — **DataDome** interstitial |
-
-Both bind their clearance to the TLS and JavaScript fingerprint of the client
-that earned it. That single fact kills every cheap fix:
-
-| Attempt | Result |
-|---|---|
-| 8 different User-Agents (Firefox 124–144, Chrome 131, Opera 110, Safari 17) via `calibre.browser()` | all 403 |
-| `curl` with a complete browser header set (`Accept`, `Accept-Language`, `Sec-Fetch-*`, `Upgrade-Insecure-Requests`) | 403 |
-| `curl` **with freshly earned cookies** | 200 — but calibre's mechanize gets **403 on the same URLs**. Python's TLS handshake itself is rejected |
-| copying cookies out of a browser | `__cf_bm` lives 30 minutes and is reissued on every response; an export is a snapshot of a self-renewing value |
-| calibre's `browser_type = 'webengine'` | returns the challenge page, never the article. The scraper backend never *navigates* to the target (it loads a stub page and runs an in-page downloader), so the challenge JavaScript never executes |
-| a spoofed User-Agent on calibre's bundled Chromium 134 | DataDome requests `Sec-CH-UA` client hints, which the real engine answers honestly. The contradiction gets the device reclassified |
-| upstream's GraphQL fallback | its host `cp2-graphql-gateway.p.aws.economist.com` no longer resolves |
-
-Kovid Goyal's assessment in the thread above is that the block is statistical
-fingerprinting and that "the only way to fix this robustly is to use a browser
-engine that is impossible to statistically isolate from regular browsers". This
-project agrees, and observes that you do not have to bundle such an engine. You
-already have one.
-
-## How this works
-
-```
-one-time:  browser export ──▶ import_curl_cookies.py ──▶ economist_session.py --seed
-                                                                   │
-every run: recipe ──▶ economist_session.py --serve ──▶ your Chromium stays up on a
-                             │                          dedicated profile, publishes
-                             │                          its DevTools endpoint
-                             └──▶ CDPBrowser ───────────────────┘
-                                  every article and image fetched with an
-                                  in-page fetch() in that session
-```
-
-1. **A dedicated, persistent Chromium profile** is seeded once with your login
-   cookies (the long-lived `fcx_*` ones). It is deliberately *not* seeded with
-   `datadome`, `__cf_bm`, `_cfuvid` or `cf_clearance`: those identify a device,
-   and copying them from a profile that has been blocked imports the block.
-2. **Each run, `economist_session.py --serve`** starts Chromium on that profile
-   with `--remote-debugging-port`, navigates to `/weeklyedition`, and **polls for
-   up to 60 s** so a DataDome interstitial has time to solve itself and reload.
-   Cookies are read back with `Network.getAllCookies`, decrypted and including
-   HttpOnly, so there is no SQLite decryption and no commit race. If `__cf_bm` is
-   still under 20 minutes old the navigation is skipped entirely.
-3. **The recipe's `get_browser()` returns a `CDPBrowser`** that mirrors the
-   surface calibre's fetcher uses (`open`, `open_novisit`, `clone_browser`,
-   `shutdown`) and fetches every article and image with an in-page `fetch()`
-   inside the live page. Same TLS, same fingerprint, same cookie jar, same origin.
-   calibre's QtWebEngine is not involved anywhere. Index parsing (`__NEXT_DATA__`)
-   is the same as the built-in recipe.
-4. **A DataDome interstitial on a fetch is ridden out, not fatal.** DataDome
-   sometimes answers an in-page `fetch()` with `403` and a body carrying
-   `'rt':'i'`. The page's own DataDome tag solves that within seconds, but it is
-   configured with `replayAfterChallenge: false`, so it never retries *our*
-   request. `CDPBrowser` therefore backs off and retries (2, 4, 8, 15 s), then
-   navigates the tab to `/weeklyedition` once and retries a last time: at most
-   six fetches in about a minute. A captcha (`'rt':'c'`) needs a human, so it
-   fails at once with a re-login hint. Detect challenges by the body's `rt`, not
-   by headers: `x-datadome: protected` is present on healthy `200`s too.
-
-The fingerprint is honest because it *is* a real browser, and the User-Agent is
-taken from `Browser.getVersion`, so it can never drift from the engine again.
-
-> **The cookies are credentials.** They live in a `chmod 600` file in calibre's
-> config directory and a `0700` profile directory. Nothing here ever prints a
-> cookie value, only names and lengths.
+Why the built-in recipe fails, how this works in detail, and the traps found on
+the way: [docs/design.md](docs/design.md).
 
 ## Requirements
 
-- An Economist subscription.
-- calibre 8 or 9 (tested on 9.7, flatpak).
-- A Chrome or Chromium. Default on Linux is the
-  `io.github.ungoogled_software.ungoogled_chromium` flatpak, on macOS and Windows an
-  installed Google Chrome or Chromium; any other is a one-line environment override (see Setup).
-- Python 3.10+ on the host for the helper scripts. **No third-party packages**:
-  the CDP client and its WebSocket implementation are stdlib only.
-- **Linux, macOS or Windows.** Linux is where this was built and is tested. macOS
-  support was contributed in
-  [#9](https://github.com/CR0CKER/calibre-economist-cdp/pull/9) and verified end
-  to end by its author; see [macOS](#macos). Windows support was contributed in
-  [#15](https://github.com/CR0CKER/calibre-economist-cdp/pull/15) and verified end
-  to end by its author; see [Windows](#windows).
+- An Economist subscription
+- calibre 8 or 9 (tested on 9.7 and 9.14)
+- Google Chrome or Chromium
+- Python 3.10+. The runtime needs no third-party packages.
+- On Windows, [uv](https://docs.astral.sh/uv/) for the virtual environment
+- Linux, macOS or Windows. Linux is where this was built and is tested. macOS
+  ([#9](https://github.com/CR0CKER/calibre-economist-cdp/pull/9)) and Windows
+  ([#15](https://github.com/CR0CKER/calibre-economist-cdp/pull/15)) were
+  contributed and verified end to end by their authors; what differs is in
+  docs/design.md under [macOS](docs/design.md#macos) and
+  [Windows](docs/design.md#windows).
 
 ## Setup
 
-One time: harvest a browser export, import it, seed the profile.
-
-**Or let the setup tool walk you through it.** `economist_setup.py` checks
-Python, the browser and calibre's config dir (and offers the flatpak grant
-below), reads the "Copy as cURL" export straight from the clipboard so no
-temporary file holds the login, lets a bad copy be retried, runs `--seed`, and
-puts the recipe on the clipboard for [Installing the recipe into
-calibre](#installing-the-recipe-into-calibre). Do steps 1-4 below in the
-browser when it asks, then:
+### 1. Get the code
 
 ```bash
-python3 economist_setup.py                    # Linux, macOS
-.venv\Scripts\python.exe economist_setup.py   # Windows
+git clone https://github.com/CR0CKER/calibre-economist-cdp ~/calibre-economist-cdp
+cd ~/calibre-economist-cdp
 ```
 
-On Linux the clipboard needs `wl-clipboard` or `xclip`; without either, save
-the copy to a file and pass `--from-file <file>`.
+On Windows, in PowerShell, also create the [uv](https://docs.astral.sh/uv/)
+virtual environment that the recipe will use:
 
-The clipboard still holds your login until the tool replaces it with the
-recipe. A clipboard history keeps it after that: on Windows clear it in Win+V
-(and turn off clipboard sync across devices, which uploads it), on Linux in
-your clipboard manager, if you run one.
+```powershell
+git clone https://github.com/CR0CKER/calibre-economist-cdp $HOME\calibre-economist-cdp
+cd $HOME\calibre-economist-cdp
+uv venv
+```
 
-The manual steps:
+Keep the checkout where it is: calibre finds the helper by this path. If you
+move it, run `--seed` again.
 
-> **`__cf_bm` is HttpOnly**, so `document.cookie` in the Console cannot see it.
-> It appears only in the Network panel's request headers.
-
-1. Open your Chromium at <https://www.economist.com/weeklyedition> and log in.
-2. DevTools (<kbd>F12</kbd>) → **Network**, clear the text filter, click **`Doc`**.
-3. **Reload twice** (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd>). The first
-   reload *receives* a new `__cf_bm`; the second one *sends* it. A copy taken after
-   only one reload has no `__cf_bm` and is rejected.
-4. Right-click the top document row (after the redirect it is named for the edition
-   date, e.g. `2026-09-05`) → **Copy** → **Copy as cURL**.
-5. Check the copy is usable (`1` = good):
-
-   ```bash
-   wl-paste | grep -c __cf_bm      # xclip -o on X11
-   ```
-
-   On macOS:
-
-   ```bash
-   pbpaste | grep -c __cf_bm
-   ```
-
-   On Windows, Chrome offers two flavours: pick **Copy as cURL (bash)**, not
-   (cmd). Then in PowerShell (`True` = good):
-
-   ```powershell
-   (Get-Clipboard -Raw) -match '__cf_bm'
-   ```
-
-6. Import and seed, on the **host** (not inside a flatpak):
-
-   ```bash
-   git clone https://github.com/CR0CKER/calibre-economist-cdp ~/calibre-economist-cdp
-   cd ~/calibre-economist-cdp
-   wl-paste > /run/user/$(id -u)/eco-curl.txt
-   python3 import_curl_cookies.py /run/user/$(id -u)/eco-curl.txt
-   python3 economist_session.py --seed
-   ```
-
-   On macOS, use the per-user `$TMPDIR` for the temporary export:
-
-   ```bash
-   pbpaste > "$TMPDIR/eco-curl.txt"
-   python3 import_curl_cookies.py "$TMPDIR/eco-curl.txt"
-   rm "$TMPDIR/eco-curl.txt"
-   python3 economist_session.py --seed
-   ```
-
-   On Windows, in PowerShell, with a [uv](https://docs.astral.sh/uv/) virtual
-   environment in the checkout (the recipe finds `.venv` there by itself):
-
-   ```powershell
-   git clone https://github.com/CR0CKER/calibre-economist-cdp $HOME\calibre-economist-cdp
-   cd $HOME\calibre-economist-cdp
-   uv venv
-   Get-Clipboard -Raw | Set-Content -NoNewline "$env:TEMP\eco-curl.txt"
-   .venv\Scripts\python.exe import_curl_cookies.py "$env:TEMP\eco-curl.txt"
-   .venv\Scripts\python.exe economist_session.py --seed
-   ```
-
-   `--seed` launches the browser, navigates, waits for the site to accept the
-   session, and writes the renewed cookie file. It also records its own location
-   in calibre's config dir so the recipe can find it. If the helper reports
-   `BLOCKED`, see Troubleshooting.
-
-**Using a different browser or profile location:** set these in the environment
-that runs calibre (for a flatpak calibre: `flatpak override --user --env=... com.calibre_ebook.calibre`):
-
-| Variable | Meaning | Default |
-|---|---|---|
-| `ECONOMIST_BROWSER_CMD` | command that starts Chromium, e.g. `google-chrome` or `flatpak run --command=chromium org.chromium.Chromium` | Linux: ungoogled-chromium flatpak; macOS and Windows: installed Chrome or Chromium |
-| `ECONOMIST_CHROME_PROFILE` | the dedicated profile directory (never your everyday profile) | inside the flatpak's config tree; Windows: `%LOCALAPPDATA%\calibre-economist-cdp\chrome-profile` |
-| `ECONOMIST_SESSION_SCRIPT` | path to `economist_session.py`, if the recorded location is wrong | the recorded location |
-| `ECONOMIST_PYTHON` | the Python the recipe runs the helper with | `python3`; Windows: `.venv\Scripts\python.exe` beside the helper, else `py` or `python` on `PATH` |
-| `ECONOMIST_DEBUG` | set to `1` to print the best-effort paths (retries, skipped teardown steps) to stderr | unset, silent |
-| `ECONOMIST_SERVE_MAX_S` | seconds after which a served browser is shut down regardless, so a crashed download cannot leave the DevTools port open | 2700 (45 min) |
-| `CALIBRE_CONFIG_DIRECTORY` | calibre's config dir, if not the flatpak or platform default (`~/Library/Preferences/calibre` on macOS, `%APPDATA%\calibre` on Windows, `~/.config/calibre` on Linux) | auto |
-
-**Flatpak calibre only:** the recipe has to start a program on the host from inside
-calibre's sandbox. Grant that once:
+### 2. Run the setup tool
 
 ```bash
-flatpak override --user --talk-name=org.freedesktop.Flatpak com.calibre_ebook.calibre
+python3 economist_setup.py                   # Linux, macOS
+.venv\Scripts\python.exe economist_setup.py  # Windows
 ```
 
-calibre already holds `filesystems=host` and `devices=all`, so this widens little
-in practice, but it is a real sandbox escape and you should know it is there.
+Run it on the host, not inside a flatpak or toolbox shell. It walks you through
+four steps:
 
-## Installing the recipe into calibre
+1. **Checks** Python, the browser and calibre's config folder. On a flatpak
+   calibre, it offers to grant the permission calibre needs to start the
+   browser.
+2. **Imports your session.** It tells you what to do in Chrome: log in at
+   <https://www.economist.com/weeklyedition>, open DevTools → **Network** →
+   **Doc**, reload **twice**, then right-click the top row → **Copy as cURL**
+   (on Windows, **Copy as cURL (bash)**). It reads the copy straight from the
+   clipboard. If the copy is wrong, it tells you why and lets you copy again.
+3. **Seeds** the dedicated browser profile. A browser window opens briefly.
+4. **Puts the recipe on the clipboard** and tells you where to paste it in
+   calibre: **Fetch news** → **Add a custom news source** → **Switch to
+   advanced mode**. Replace the template with the clipboard contents, title it
+   "The Economist (CDP)", and click **Add/Update recipe**.
 
-Fetch news → **Add a custom news source** → **Switch to advanced mode** → paste the
-contents of `economist.recipe` → give it a title such as "The Economist (CDP)" →
-Add/Update recipe. Then schedule *that* recipe, not the built-in one.
+Then download or schedule **that** recipe, not the built-in one.
 
-To update an installed copy later, edit the same custom recipe in place (or from the
-command line, `update_custom_recipe(<id>, title, source)` via `calibre-debug`).
-Do not add a second copy; a scheduled recipe is tied to its id.
+The clipboard holds your login until the tool replaces it with the recipe. A
+clipboard history keeps it after that: on Windows clear it in Win+V (and turn
+off clipboard sync across devices, which uploads it), on Linux in your
+clipboard manager, if you run one.
 
-Editing `economist_session.py` or `economist_chrome.py` needs no reinstall. The
-recipe reads them from disk at run time.
+On Linux the clipboard needs `wl-clipboard` (Wayland) or `xclip`. Without
+either, save the cURL copy to a file and run
+`economist_setup.py --from-file <file>`. The tool offers to delete that file
+afterwards, since it holds your login.
+
+To update the recipe later, edit the same custom recipe in place rather than
+adding a second copy: a schedule is tied to the recipe it was set on. Changes
+to the `.py` files need no reinstall. For the same reason, when you run the
+setup tool again later, for example after a block, skip its step 4 if the
+recipe is already installed.
+
+To do all of this by hand instead, see [docs/manual-setup.md](docs/manual-setup.md).
 
 ## Everyday use
 
-Download the recipe in calibre as usual; it refreshes the session itself,
-so scheduled unattended downloads work.
-
-To inspect or refresh by hand:
+Download or schedule the recipe in calibre as usual. To check or refresh the
+session by hand:
 
 ```bash
-python3 economist_session.py --status
-python3 economist_session.py --refresh
-python3 economist_session.py --stop      # shut down a browser left running by a download
+python3 economist_session.py --status    # what the session last did
+python3 economist_session.py --refresh   # renew now; exits 0 when it works
+python3 economist_session.py --stop      # close a browser left running
 ```
 
-`--refresh` exits `0` when the session works. On failure it reports which kind of
-DataDome response it got and saves the page as `last-challenge.html` in the profile:
+On Windows, use `.venv\Scripts\python.exe` in place of `python3`.
 
-| Reported | Meaning |
-|---|---|
-| `rt=i` (interstitial) | A soft challenge that did not resolve in 60 s. Retry; if it persists, re-seed. |
-| `rt=c` (hard block) | The device is burned. Log in again in the browser and re-run `--seed`. |
+Download no more than one edition at a time, with hours between attempts.
+Rapid repeated sessions can get your IP a temporary captcha.
 
-Routine cookie expiry needs no intervention. The login cookies persist for months.
+## Configuration
 
-## Design notes and traps
+Set these in the environment that runs calibre. All are optional.
 
-Every one of these caused a silent failure during development.
+| Variable | Meaning | Default |
+|---|---|---|
+| `ECONOMIST_BROWSER_CMD` | Command that starts the browser, e.g. `google-chrome`; quote paths with spaces | Linux: ungoogled-chromium flatpak; macOS/Windows: installed Chrome or Chromium |
+| `ECONOMIST_CHROME_PROFILE` | The dedicated profile directory (never your everyday profile) | Linux/macOS: `~/.var/app/io.github.ungoogled_software.ungoogled_chromium/config/chromium-economist`; Windows: `%LOCALAPPDATA%\calibre-economist-cdp\chrome-profile` |
+| `ECONOMIST_PYTHON` | Python used to run the helper | `python3`; Windows: `.venv\Scripts\python.exe` in the checkout, else `py` or `python` on `PATH` |
+| `ECONOMIST_SESSION_SCRIPT` | Path to `economist_session.py` | recorded by `--seed` |
+| `ECONOMIST_SERVE_MAX_S` | Hard limit in seconds before a served browser is closed | 2700 |
+| `ECONOMIST_DEBUG` | `1` prints retry and teardown details to stderr | off |
+| `CALIBRE_CONFIG_DIRECTORY` | calibre's config folder | `~/.config/calibre`, `~/Library/Preferences/calibre` or `%APPDATA%\calibre` |
 
-| Trap | Consequence |
-|---|---|
-| **Lying about the User-Agent** (claiming Chrome 151 from a Chromium 134 engine) | `Sec-CH-UA` client hints report the real version. DataDome sees the contradiction and reclassifies the device. Take the UA *from the browser* (`Browser.getVersion`) |
-| Sampling the page **once**, shortly after load | A DataDome interstitial takes seconds and reloads itself, so a single early sample only ever sees the challenge. Poll to a timeout |
-| Seeding `datadome` / `__cf_bm` into a fresh profile | Those identify a *device*. Copying them from a blocked profile imports the block. Seed the login cookies only |
-| Reading Chromium's `Cookies` SQLite file directly | Values are encrypted with OSCrypt. `Network.getAllCookies` returns them decrypted, HttpOnly included |
-| `flatpak-spawn --host` **without `--directory=`** | The sandbox's CWD during a fetch is a private `/tmp/calibre-*` path that does not exist on the host; the portal refuses: `Failed to change to directory …` |
-| Putting the CDP endpoint file under the **browser's** `~/.var/app/…` tree | flatpak reserves `~/.var/app`; an app with `filesystems=host` still sees only its *own* subtree there, so the recipe cannot find the endpoint and the download fails outright. It lives in calibre's config dir instead |
-| An in-page `fetch()` to a **cross-origin** URL | Blocked by CORS (`TypeError: Failed to fetch`). Non-economist.com URLs (the masthead) go through plain `urllib`; they need no credentials |
-| Using `curl` to decide whether mechanize will work | curl 200, mechanize 403, same cookies, same URLs. Not a valid proxy |
-| Selecting cookies with `host_key LIKE '%economist.com'` | `.marber-cdn.economist.com` and `p.zephr.economist.com` carry **their own `__cf_bm`**. Symptom: most articles die with `IndexError` while the index works. Use the exact hosts |
-| `--headless` | Is itself a bot signal. The browser runs headful, positioned off-screen and minimized, with background throttling disabled |
-| `--remote-allow-origins=*` on the DevTools port | Lets **any web page open in any browser on the machine** connect to the port and read the logged-in session's cookies. Chromium admits origin-less clients (this one sends no `Origin`) and rejects browser-originated ones without the flag, so it is simply omitted. A reaper also closes a served browser after `ECONOMIST_SERVE_MAX_S` |
-| `browser_type = 'webengine'` set only inside `get_content` | Index works, every article 403s: articles and images go through `self.browser` in calibre's own fetcher |
-| Running `ebook-convert` from a path a flatpak calibre cannot see (`/tmp/…`) | calibre falls back to a builtin-title lookup and reports a misleading `TypeError: 'NoneType' object is not subscriptable` |
+For a flatpak calibre, set them with
+`flatpak override --user --env=NAME=value com.calibre_ebook.calibre`.
 
 ## Troubleshooting
 
-| Symptom | Cause and fix |
+| Symptom | Fix |
 |---|---|
-| `--refresh` says **BLOCKED, rt=i** | Interstitial did not clear in 60 s. Retry once; if it persists, redo Setup. Inspect `last-challenge.html` in the profile. |
-| `--refresh` says **BLOCKED, rt=c**, or the download fails with `HTTP Error 403: … DataDome captcha` | Hard block. Log in again in the browser (solve the captcha if shown), then `--seed`. **Do not retry in a loop**: rapid repeated sessions are what escalates DataDome from an interstitial to a captcha. Wait, then make one attempt. |
-| Log shows `DataDome interstitial on … - retry N` | Normal: the recipe is waiting for DataDome to clear a challenge it solves by itself. Only a bare `HTTP Error 403` at the end means it did not clear within about a minute. |
-| `Portal call failed: … ServiceUnknown` | Flatpak calibre lacks the host-spawn grant; see Setup. |
-| `Failed to change to directory "/tmp/calibre-…"` | `flatpak-spawn` called without `--directory=`. Should not happen with this recipe; report it. |
-| `ERROR: chromium exited early` | Another Chromium is already using that profile directory, or the browser command is wrong (`ECONOMIST_BROWSER_CMD`). |
-| `the copied request has no __cf_bm cookie` | You copied a stale row from the Network log. Clear it, reload **twice**, copy the new top document row. |
-| `USER_AGENT missing or still a placeholder` | The cookie file was never imported. Run `import_curl_cookies.py`. |
+| `--seed`/`--refresh` says **BLOCKED, rt=i** | A challenge didn't clear in 60 s. Retry once; if it persists, run `economist_setup.py` again. The page is saved as `last-challenge.html` in the profile. |
+| **BLOCKED, rt=c**, or `DataDome captcha` in the download log | Log in again in your browser (solve the captcha), then run `economist_setup.py` again. Wait between attempts; don't retry in a loop. |
+| `DataDome interstitial on … - retry N` in the log | Normal. The recipe waits for the challenge to clear. Only a bare `HTTP Error 403` at the end means it did not clear within about a minute. |
+| `the copied request has no __cf_bm cookie` | You copied a stale row. Clear the Network log, reload twice, copy the new top row. |
+| `that is "Copy as cURL (cmd)"` | On Windows, use **Copy as cURL (bash)**. |
+| `USER_AGENT missing or still a placeholder` | The session was never imported. Run `economist_setup.py`. |
 | `… is group/world readable` | `chmod 600` the cookie file. |
-| Every article 403s, log says `CDP transport unavailable` or nothing about `session:` | The recipe could not find or run `economist_session.py`. Check the recorded path in `<calibre config>/economist-session.path` or set `ECONOMIST_SESSION_SCRIPT`. |
-| Many articles fail with `IndexError: list index out of range` | Fetched page had no `__NEXT_DATA__`, usually a wrong `__cf_bm` (host trap above). |
-| `NoArticles` | The index parsed but was empty: the site's `__NEXT_DATA__` layout changed and the parser needs updating. |
+| `ERROR: chromium exited early` | The dedicated profile is already open in another browser window, or `ECONOMIST_BROWSER_CMD` is wrong. |
+| `CDP transport unavailable`, or every article 403s | calibre couldn't find or run the helper. Check the path in `<calibre config>/economist-session.path`, run `--seed` again from the checkout, or set `ECONOMIST_SESSION_SCRIPT`. |
+| Many articles fail with `IndexError: list index out of range` | The fetched page had no `__NEXT_DATA__`, usually a wrong `__cf_bm`. Run `economist_setup.py` again. |
+| `Portal call failed: … ServiceUnknown` | Flatpak calibre lacks the host permission; run `economist_setup.py` and accept the offer, or `flatpak override --user --talk-name=org.freedesktop.Flatpak com.calibre_ebook.calibre`. |
+| `Failed to change to directory "/tmp/calibre-…"` | Should not happen with this recipe; please report it. |
+| `NoArticles` | The site's page layout changed; the parser needs an update. |
 
-## Known limitations
+Your session is tied to your IP and your browser's User-Agent. Set it up on the
+machine that will download, and run `--seed` again after a network change.
 
-- **mechanize can never work, so there is no fallback transport.** Clearance is
-  bound to the TLS fingerprint; only a real browser's handshake is accepted. If
-  the served session is missing the download fails immediately and says so,
-  rather than silently producing an edition of error pages.
-- **Request rate matters to DataDome.** It scores patterns, not just
-  fingerprints. One download at a time, with hours between attempts, is fine;
-  bursts of fresh sessions hammering the index are not, and can earn the IP a
-  temporary captcha block.
-- **Fetches are serialised.** One websocket means one CDP call at a time. Each fetch
-  is a few tenths of a second, so a full edition takes a few minutes.
-- **The session is IP- and User-Agent-bound.** Seed on the machine that will
-  download, and re-seed after a network change.
-- **A bot-management vendor can reclassify the device at any time.** This design
-  makes that *legible* (the failing page is saved, the DataDome response type is
-  reported) and recoverable with a re-seed. It is not a guarantee, and if enough
-  people run the same setup the statistics may catch up with it too. Each user
-  driving their own real browser profile is the best defence available.
-- A handful of items are legitimately short: cartoons, photo pieces, the indicators
-  table, and `/interactive/` articles, which the recipe replaces with a
-  browser-only notice, as upstream does.
+## Security
+
+The cookie file in calibre's config folder is your login. Nothing here prints
+cookie values. On Linux and macOS the cookie file is created `0600` and the
+profile `0700`. On Windows only your user account's permissions protect them. The
+browser's DevTools port listens on localhost only and refuses connections from
+web pages.
 
 ## Files
 
-| Path | Purpose |
+| File | Purpose |
 |---|---|
-| `economist.recipe` | The recipe. Paste into calibre as a custom news source. |
-| `economist_setup.py` | Interactive one-time setup: import from the clipboard, `--seed`, recipe onto the clipboard. |
-| `economist_session.py` | Entry point: freshness logic, cookie-file contract, reporting, config-dir discovery. |
-| `economist_chrome.py` | The navigator and fetch session: drives Chromium over CDP; `--serve` leaves it running. Contains a minimal RFC 6455 WebSocket client so there is nothing to install. |
-| `import_curl_cookies.py` | One-time import from a DevTools "Copy as cURL". |
-| `check_economist_access.py` | Standalone diagnostic: does the served session reach the site? Run it after `--serve`. |
-| `test_*.py`, `conftest.py` | Unit tests (147). `conftest.py` loads the recipe with calibre's imports stubbed so it can be tested. Run via `scripts/gates.sh` |
+| `economist.recipe` | The recipe you paste into calibre |
+| `economist_setup.py` | One-time setup wizard |
+| `economist_session.py` | Session helper: `--seed`, `--refresh`, `--serve`, `--stop`, `--status` |
+| `economist_chrome.py` | Drives the browser over DevTools, with a minimal stdlib WebSocket client so there is nothing to install |
+| `import_curl_cookies.py` | Imports the "Copy as cURL" export |
+| `check_economist_access.py` | Diagnostic: checks whether a served session reaches the site |
+| `test_*.py`, `conftest.py` | Unit tests (147). `conftest.py` loads the recipe with calibre's imports stubbed |
 | `scripts/gates.sh` | The merge gates: `ruff`, `bandit`, `pytest`. CI runs exactly this script |
 | `requirements-dev.txt` | Hash-locked dev tools (pytest, ruff, bandit). Not needed at run time |
-
-Runtime state, all outside the repository:
-
-| Path | Purpose |
-|---|---|
-| `<calibre config>/economist_cookies.txt` | Credentials, `0600`. |
-| `<calibre config>/economist-session.path` | Where the recipe finds the helper. |
-| `<calibre config>/economist-cdp-endpoint.json` | The live DevTools endpoint while a download runs. |
-| `<profile dir>/` | The dedicated Chromium profile, `0700`. |
-
-## macOS
-
-Contributed by [@jordanhong](https://github.com/jordanhong) in
-[#9](https://github.com/CR0CKER/calibre-economist-cdp/pull/9). I have no Mac, so
-this rests on the contributor's test and on the unit tests, which run on Linux.
-
-**Verified on:** macOS 15.7.9 on Apple Silicon (`arm64`), calibre 9.14.0, Google
-Chrome 153.0.8010.48, Python 3.13.5: a full end-to-end edition download.
-
-What differs from Linux, all selected automatically by `sys.platform == 'darwin'`:
-
-| Where | On macOS |
-|---|---|
-| calibre's config dir | `~/Library/Preferences/calibre`, calibre's native location. `CALIBRE_CONFIG_DIRECTORY` still wins |
-| `economist_chrome.py`, default browser | The first of `/Applications/Google Chrome.app`, `/Applications/Chromium.app`, then `google-chrome`, `chromium` or `chromium-browser` on `PATH`. `ECONOMIST_BROWSER_CMD` still wins |
-| `economist_chrome.py`, `ECONOMIST_BROWSER_CMD` | Parsed with `shlex.split()` on every platform, so quote a path with spaces: `ECONOMIST_BROWSER_CMD='"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"'` |
-| `economist_chrome.py`, `pid_is_our_browser` | macOS has no `/proc`, so `/bin/ps -p <pid> -o command=` supplies the command line for the same profile-path check before the crash-only pid fallback. The normal shutdown still goes over CDP |
-| Setup | `pbpaste` instead of `wl-paste`, and the cURL copy goes to the per-user `$TMPDIR` (see [Setup](#setup) step 6) |
-
-The default profile directory is still the flatpak-shaped
-`~/.var/app/io.github.ungoogled_software.ungoogled_chromium/config/chromium-economist`.
-It works on macOS, the browser just creates it; set `ECONOMIST_CHROME_PROFILE`
-if you would rather keep it somewhere else.
-
-<sub>[↑ Back to contents](#contents)</sub>
-
-## Windows
-
-**Verified by its author**
-([#15](https://github.com/CR0CKER/calibre-economist-cdp/pull/15)) on Windows 11
-Pro, calibre 9.14, Google Chrome 155, Python 3.13 in a uv virtual environment:
-a full end-to-end edition download, set up with `economist_setup.py`. The unit tests pass on Windows; those that assert POSIX
-permission bits are skipped there.
-
-What differs, all selected automatically by `sys.platform == 'win32'`:
-
-| Where | On Windows |
-|---|---|
-| calibre's config dir | `%APPDATA%\calibre`, calibre's native location. Inside calibre the recipe asks calibre itself |
-| Default browser | `chrome.exe` of Google Chrome or Chromium under Program Files, Program Files (x86) or `%LOCALAPPDATA%`, then `chrome` or `chromium` on `PATH` |
-| Default profile | `%LOCALAPPDATA%\calibre-economist-cdp\chrome-profile` |
-| `ECONOMIST_BROWSER_CMD` | Parsed in Windows mode, so backslashes survive; quote a path with spaces |
-| Python for the helper | `.venv\Scripts\python.exe` beside `economist_session.py`, then the `py` launcher, then `python` on `PATH` (the `py` launcher comes first because a fresh Windows has a `python.exe` that only opens the Microsoft Store); `ECONOMIST_PYTHON` overrides. calibre's own interpreter is not usable for this |
-| Console windows | The helper and its watchdog are started with `CREATE_NO_WINDOW`, so a scheduled download does not flash a console |
-| `--stop`'s pid fallback | No `/proc` or `ps`: the command line comes from `Get-CimInstance Win32_Process` through PowerShell, for the same profile-path check, read as UTF-8 so a user name with non-ASCII letters still matches |
-| Permission checks | **Off.** Windows has no POSIX permission bits and reports every writable file as `0666`, so the cookie-file and session-pointer checks would refuse everything. The credential files are protected only by the ACL of your user profile, where they live |
-| Setup | "Copy as cURL (**bash**)", `Get-Clipboard` instead of `wl-paste` (see [Setup](#setup) step 6). The importer accepts the BOM and CRLF a Windows paste brings, and rejects the (cmd) flavour |
-
-The hash-locked `requirements-dev.txt` was compiled on Linux and lacks
-`colorama`, which pytest needs on Windows. For local development there, install
-the pinned top-level tools instead: `uv pip install -r requirements-dev.in`.
-
-<sub>[↑ Back to contents](#contents)</sub>
-
-## Platform notes: flatpak and Fedora Linux
-
-This was built on Fedora (aarch64) with calibre and Chromium both as
-flatpaks. Two things there are worth knowing even if you are elsewhere:
-
-- On that machine calibre's own QtWebEngine worker (`calibre-parallel`) segfaults
-  inside `libQt6WebEngineCore`, and worse than crashing it *hangs* the download job.
-  That is why this design keeps QtWebEngine out of the fetch path entirely rather
-  than using `browser_type = 'webengine'` with replayed cookies.
-- A flatpak override with `--disable-gpu` for calibre, added to stop those
-  crashes, removed WebGL from calibre's Chromium and was one of the two signals
-  that got the device reclassified by DataDome. Driving an external browser
-  sidesteps this too.
+| `docs/` | Design notes and history, and the manual setup |
 
 ## Development
 
@@ -434,6 +196,10 @@ flatpaks. Two things there are worth knowing even if you are elsewhere:
 python3 -m venv .venv && .venv/bin/pip install --require-hashes -r requirements-dev.txt
 PATH=.venv/bin:$PATH scripts/gates.sh
 ```
+
+On Windows, `requirements-dev.txt` can't be used: it was generated on Linux and
+lacks `colorama`, which pytest needs on Windows. Install the same tool versions
+from `requirements-dev.in` instead: `uv pip install -r requirements-dev.in`.
 
 CI (`.github/workflows/ci.yml`) runs the same script plus a gitleaks scan of the
 full history on every push and pull request, and is a required check on `main`.

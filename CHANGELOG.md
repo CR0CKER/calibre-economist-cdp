@@ -17,6 +17,7 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - A DataDome captcha (`'rt':'c'`) now fails immediately with a "log in again, then `--seed`" message instead of a bare `HTTP Error 403`.
 
 ### Changed
+- README cut down to setup and use (450 lines to about 210), built around `economist_setup.py`. The background, how it works, the design notes and traps, the known limitations, the runtime state and the macOS, Windows and flatpak notes move to `docs/design.md`, unchanged apart from links; the manual setup steps, the flatpak grant and the recipe install details to `docs/manual-setup.md`.
 - README states plainly that Linux is the only supported platform and adds a *Porting to macOS and Windows* section naming the exact blockers found by an audit, so the work is pickup-able by someone who can test on those platforms.
 - `ECONOMIST_BROWSER_CMD` is parsed with `shlex.split()` instead of being split on whitespace, so a quoted executable path with spaces works (#9). An empty value now falls back to the default browser instead of crashing.
 - README after #15: Windows marked as verified by its author, like macOS; the setup tool's section warns that a clipboard history (Windows Win+V and its device sync) keeps the cURL export with the login.
